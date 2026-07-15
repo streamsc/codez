@@ -1,9 +1,10 @@
 ---
 source: tui/src/app/thread_goal_actions.rs
+assertion_line: 418
 expression: terminal.backend()
 ---
 
 
 ■ Goals need a saved session. This session is temporary.
-Run `codex` to start a saved session, or `codex resume` / `/resume` to
+Run `codez` to start a saved session, or `codez resume` / `/resume` to
 reopen one.

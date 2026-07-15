@@ -1,10 +1,11 @@
 ---
 source: tui/src/keymap_setup.rs
+assertion_line: 1368
 expression: rendered
 ---
 Keypress Inspector
-Press any key to see what Codex receives. Esc is inspected; Ctrl+C closes.
+Press any key to see what Codez receives. Esc is inspected; Ctrl+C closes.
 Still waiting? If nothing changes when you press a key, your terminal is not sending that key to
-Codex. Only received keys can be assigned as shortcuts.
+Codez. Only received keys can be assigned as shortcuts.
 
 Waiting for a keypress...

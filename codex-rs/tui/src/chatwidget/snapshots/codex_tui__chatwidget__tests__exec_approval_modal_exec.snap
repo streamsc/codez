@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/exec_flow.rs
-assertion_line: 40
+assertion_line: 37
 expression: "format!(\"{buf:?}\")"
 ---
 Buffer {
@@ -16,7 +16,7 @@ Buffer {
         "  $ echo hello world                                                            ",
         "                                                                                ",
         "› 1. Yes, proceed (y)                                                           ",
-        "  2. No, and tell Codex what to do differently (esc)                            ",
+        "  2. No, and tell Codez what to do differently (esc)                            ",
         "                                                                                ",
         "  Press enter to confirm or esc to cancel                                       ",
     ],

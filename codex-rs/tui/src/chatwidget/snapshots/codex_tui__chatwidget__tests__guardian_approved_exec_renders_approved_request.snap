@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/guardian.rs
+assertion_line: 169
 expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 ---
 
@@ -7,10 +8,10 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 
 
 
-✔ Auto-reviewer approved codex to run rm -f /tmp/guardian-approved.sqlite this
+✔ Auto-reviewer approved Codez to run rm -f /tmp/guardian-approved.sqlite this
   time
 
 
-› Ask Codex to do anything
+› Ask Codez to do anything
 
   gpt-5.6-sol default · /tmp/project

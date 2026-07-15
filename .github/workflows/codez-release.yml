@@ -1,0 +1,97 @@
+name: codez-release
+
+on:
+  push:
+    tags:
+      - "codez-v*.*.*-r*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codez-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      TARGET: aarch64-apple-darwin
+      ARCHIVE: codez-package-aarch64-apple-darwin.tar.gz
+      CHECKSUMS: codez-package_SHA256SUMS
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_NAME}" =~ ^codez-v([0-9]+\.[0-9]+\.[0-9]+)-r([1-9][0-9]*)$ ]] \
+            || { echo "Invalid Codez tag: ${GITHUB_REF_NAME}" >&2; exit 1; }
+          upstream_version="${BASH_REMATCH[1]}"
+          revision="${BASH_REMATCH[2]}"
+          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' codex-rs/Cargo.toml | head -n 1)"
+          [[ "${upstream_version}" == "${cargo_version}" ]] \
+            || { echo "Tag upstream version ${upstream_version} != Cargo ${cargo_version}" >&2; exit 1; }
+          echo "display=${upstream_version}-r${revision}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "arm64" ]] || { echo "Expected arm64 runner" >&2; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Configure verified rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Build unsigned Codez package
+        shell: bash
+        env:
+          CODEZ_VERSION: ${{ steps.version.outputs.display }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 scripts/build_codex_package.py \
+            --variant codez \
+            --target "${TARGET}" \
+            --cargo-profile release \
+            --package-dir dist/codez-package \
+            --archive-output "dist/${ARCHIVE}" \
+            --force
+
+          test -x dist/codez-package/bin/codez
+          test -x dist/codez-package/bin/codex-code-mode-host
+          [[ "$(dist/codez-package/bin/codez --version)" == "codez ${{ steps.version.outputs.display }}" ]]
+
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 "${ARCHIVE}" > "${CHECKSUMS}"
+          cp ../scripts/install/install-codez.sh install-codez.sh
+          chmod 0755 install-codez.sh
+
+      - name: Publish unsigned GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/${ARCHIVE}" \
+            "dist/${CHECKSUMS}" \
+            "dist/install-codez.sh" \
+            --title "Codez ${{ steps.version.outputs.display }}" \
+            --generate-notes \
+            --verify-tag

@@ -1,4 +1,4 @@
-//! Diagnoses whether Codex update paths target the running installation.
+//! Diagnoses whether Codez update paths target the running installation.
 //!
 //! Update diagnostics combine cached version metadata, install-channel hints,
 //! and bounded latest-version probes. For npm-managed launches, this module also
@@ -22,8 +22,9 @@ use super::npm_global_root_check;
 use super::run_command;
 
 const VERSION_FILE_NAME: &str = "version.json";
-const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
-const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
+const VERSION_DIR_NAME: &str = "codez";
+const GITHUB_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/streamsc/codez/releases/latest";
 
 /// Builds the update-health row for the current installation.
 ///
@@ -40,7 +41,10 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
         ),
         format!("update action: {}", update_action_label(&install_context)),
     ];
-    let version_file = config.codex_home.join(VERSION_FILE_NAME);
+    let version_file = config
+        .codex_home
+        .join(VERSION_DIR_NAME)
+        .join(VERSION_FILE_NAME);
     push_cached_version_details(&mut details, &version_file);
 
     let mut status = CheckStatus::Ok;
@@ -72,10 +76,8 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
             NpmRootCheck::MissingPackageRoot => {
                 status = status.max(CheckStatus::Warning);
                 summary = "npm update target could not be proven".to_string();
-                remediation = Some(
-                    "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
-                        .to_string(),
-                );
+                remediation =
+                    Some("Reinstall or update Codez from its standalone release.".to_string());
             }
             NpmRootCheck::NpmUnavailable(error) => {
                 status = status.max(CheckStatus::Warning);
@@ -88,7 +90,7 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
     match fetch_latest_version(&install_context) {
         Ok(latest_version) => {
             details.push(format!("latest version: {latest_version}"));
-            if is_newer(&latest_version, env!("CARGO_PKG_VERSION")) == Some(true) {
+            if is_newer(&latest_version, crate::CODEZ_CLI_VERSION) == Some(true) {
                 details.push("latest version status: newer version is available".to_string());
             } else {
                 details.push("latest version status: current version is not older".to_string());
@@ -131,10 +133,9 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
 
 fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
-        InstallMethod::Npm => "npm install -g @openai/codex",
-        InstallMethod::Bun => "bun install -g @openai/codex",
-        InstallMethod::Pnpm => "pnpm add -g @openai/codex",
-        InstallMethod::Brew => "brew upgrade --cask codex",
+        InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Pnpm | InstallMethod::Brew => {
+            "unsupported Codez package manager"
+        }
         InstallMethod::Standalone { .. } => "standalone installer",
         InstallMethod::Other => "manual or unknown",
     }
@@ -142,10 +143,10 @@ fn update_action_label(context: &InstallContext) -> &'static str {
 
 fn fetch_latest_version(context: &InstallContext) -> Result<String, String> {
     match &context.method {
-        InstallMethod::Brew => fetch_homebrew_cask_version(),
         InstallMethod::Npm
         | InstallMethod::Bun
         | InstallMethod::Pnpm
+        | InstallMethod::Brew
         | InstallMethod::Standalone { .. }
         | InstallMethod::Other => fetch_latest_github_release_version(),
     }
@@ -159,18 +160,9 @@ fn fetch_latest_github_release_version() -> Result<String, String> {
 
     let info = http_get_json::<ReleaseInfo>(GITHUB_LATEST_RELEASE_URL)?;
     info.tag_name
-        .strip_prefix("rust-v")
+        .strip_prefix("codez-v")
         .map(str::to_string)
         .ok_or_else(|| format!("failed to parse latest tag {}", info.tag_name))
-}
-
-fn fetch_homebrew_cask_version() -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct HomebrewCaskInfo {
-        version: String,
-    }
-
-    http_get_json::<HomebrewCaskInfo>(HOMEBREW_CASK_API_URL).map(|info| info.version)
 }
 
 fn http_get_json<T>(url: &str) -> Result<T, String>
@@ -188,12 +180,19 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
-fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = value.trim().split('.');
+fn parse_version(value: &str) -> Option<(u64, u64, u64, u64)> {
+    let (upstream_version, revision) = match value.trim().rsplit_once("-r") {
+        Some((upstream_version, revision)) => (upstream_version, revision.parse::<u64>().ok()?),
+        None => (value.trim(), 0),
+    };
+    let mut parts = upstream_version.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next()?.parse::<u64>().ok()?;
     let patch = parts.next()?.parse::<u64>().ok()?;
-    Some((major, minor, patch))
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch, revision))
 }
 
 #[derive(Deserialize)]
@@ -217,20 +216,26 @@ mod tests {
     }
 
     #[test]
+    fn is_newer_compares_codez_release_revisions() {
+        assert_eq!(is_newer("1.2.3-r2", "1.2.3-r1"), Some(true));
+        assert_eq!(is_newer("1.2.3-r1", "1.2.3"), Some(true));
+    }
+
+    #[test]
     fn update_action_labels_install_contexts() {
         assert_eq!(
             update_action_label(&InstallContext {
                 method: InstallMethod::Npm,
                 package_layout: None,
             }),
-            "npm install -g @openai/codex"
+            "unsupported Codez package manager"
         );
         assert_eq!(
             update_action_label(&InstallContext {
                 method: InstallMethod::Pnpm,
                 package_layout: None,
             }),
-            "pnpm add -g @openai/codex"
+            "unsupported Codez package manager"
         );
         assert_eq!(
             update_action_label(&InstallContext {

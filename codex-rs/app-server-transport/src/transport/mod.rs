@@ -49,9 +49,9 @@ pub use websocket::start_websocket_acceptor;
 
 const OVERLOADED_ERROR_CODE: i64 = -32001;
 
-const APP_SERVER_CONTROL_SOCKET_DIR_NAME: &str = "app-server-control";
-const APP_SERVER_CONTROL_SOCKET_FILE_NAME: &str = "app-server-control.sock";
-const APP_SERVER_STARTUP_LOCK_FILE_NAME: &str = "app-server-startup.lock";
+const APP_SERVER_CONTROL_SOCKET_DIR_NAME: &str = "codez-app-server";
+const APP_SERVER_CONTROL_SOCKET_FILE_NAME: &str = "control.sock";
+const APP_SERVER_STARTUP_LOCK_FILE_NAME: &str = "startup.lock";
 
 pub fn app_server_control_socket_path(codex_home: &Path) -> std::io::Result<AbsolutePathBuf> {
     AbsolutePathBuf::from_absolute_path(

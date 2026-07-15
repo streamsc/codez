@@ -53,6 +53,11 @@ PACKAGE_VARIANTS: dict[str, PackageVariant] = {
         cargo_bin="codex",
         executable_stem="codex",
     ),
+    "codez": PackageVariant(
+        name="codez",
+        cargo_bin="codex",
+        executable_stem="codez",
+    ),
     "codex-app-server": PackageVariant(
         name="codex-app-server",
         cargo_bin="codex-app-server",

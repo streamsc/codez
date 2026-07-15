@@ -1,9 +1,10 @@
 ---
 source: tui/src/bottom_pane/chat_composer.rs
+assertion_line: 4731
 expression: terminal.backend()
 ---
 "                                                                                                    "
-"› Ask Codex to do anything                                                                          "
+"› Ask Codez to do anything                                                                          "
 "                                                                                                    "
 "                                                                                                    "
 "                                                                                                    "

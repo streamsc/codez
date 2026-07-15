@@ -1,10 +1,11 @@
 ---
 source: tui/src/keymap_setup.rs
+assertion_line: 1380
 expression: rendered
 ---
 Keypress Inspector
-Press any key to see what Codex receives. Esc is inspected; Ctrl+C closes.
-Tip: Codex can only inspect keys your terminal sends.
+Press any key to see what Codez receives. Esc is inspected; Ctrl+C closes.
+Tip: Codez can only inspect keys your terminal sends.
 
 Detected: ctrl + o
 Config key: ctrl-o

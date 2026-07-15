@@ -200,21 +200,13 @@ fn default_control_socket_path() -> AbsolutePathBuf {
 }
 
 fn test_socket_path(temp_dir: &Path) -> AbsolutePathBuf {
-    AbsolutePathBuf::from_absolute_path(
-        temp_dir
-            .join("app-server-control")
-            .join("app-server-control.sock"),
-    )
-    .expect("socket path should resolve")
+    AbsolutePathBuf::from_absolute_path(temp_dir.join("codez-app-server").join("control.sock"))
+        .expect("socket path should resolve")
 }
 
 fn test_startup_lock_path(temp_dir: &Path) -> AbsolutePathBuf {
-    AbsolutePathBuf::from_absolute_path(
-        temp_dir
-            .join("app-server-control")
-            .join("app-server-startup.lock"),
-    )
-    .expect("startup lock path should resolve")
+    AbsolutePathBuf::from_absolute_path(temp_dir.join("codez-app-server").join("startup.lock"))
+        .expect("startup lock path should resolve")
 }
 
 async fn connect_to_socket(socket_path: &Path) -> IoResult<UnixStream> {

@@ -14,7 +14,7 @@ use super::CheckStatus;
 use super::DoctorCheck;
 
 const MAX_PROBE_ERROR_CHARS: usize = 120;
-const STATE_DIR_NAME: &str = "app-server-daemon";
+const STATE_DIR_NAME: &str = "codez-app-server-daemon";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const PID_FILE_NAME: &str = "app-server.pid";
 const UPDATE_PID_FILE_NAME: &str = "app-server-updater.pid";
@@ -70,7 +70,7 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
     )
     .details(details);
     if status.check_status() == CheckStatus::Warning {
-        check = check.remediation("Run codex app-server daemon version for more details.");
+        check = check.remediation("Run codez app-server daemon version for more details.");
     }
     check
 }

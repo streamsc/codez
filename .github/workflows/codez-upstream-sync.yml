@@ -1,0 +1,104 @@
+name: codez-upstream-sync
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Optional stable rust-vX.Y.Z tag to propose
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: codez-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: codez
+          fetch-depth: 0
+
+      - name: Resolve upstream stable tag
+        id: upstream
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/openai/codex.git
+          git fetch --force --tags upstream
+
+          if [[ -n "${REQUESTED_TAG}" ]]; then
+            latest="${REQUESTED_TAG}"
+          else
+            latest="$({
+              git tag --list 'rust-v*'
+            } | grep -E '^rust-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+          fi
+
+          [[ "${latest}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "Invalid stable upstream tag: ${latest}" >&2; exit 1; }
+          git rev-parse --verify "refs/tags/${latest}" >/dev/null
+
+          current="$(tr -d '[:space:]' < .codez/upstream-version)"
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          if [[ "${current}" == "${latest}" ]]; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create upstream update branch
+        if: steps.upstream.outputs.needs_update == 'true'
+        id: branch
+        shell: bash
+        env:
+          LATEST_TAG: ${{ steps.upstream.outputs.latest }}
+        run: |
+          set -euo pipefail
+          branch="upstream/${LATEST_TAG}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git checkout -B "${branch}" codez
+          git merge --no-ff --no-commit -X ours "${LATEST_TAG}"
+          mkdir -p .codez
+          printf '%s\n' "${LATEST_TAG}" > .codez/upstream-version
+          git add -A
+          git commit -m "chore: sync upstream ${LATEST_TAG}"
+          git push --force-with-lease origin "HEAD:${branch}"
+          echo "name=${branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Open manual-review pull request
+        if: steps.upstream.outputs.needs_update == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          CURRENT_TAG: ${{ steps.upstream.outputs.current }}
+          LATEST_TAG: ${{ steps.upstream.outputs.latest }}
+        run: |
+          set -euo pipefail
+          if [[ "$(gh pr list --base codez --head "${BRANCH}" --state open --json number --jq 'length')" -gt 0 ]]; then
+            echo "An open PR already exists for ${BRANCH}."
+            exit 0
+          fi
+
+          gh pr create \
+            --base codez \
+            --head "${BRANCH}" \
+            --title "chore: sync upstream ${LATEST_TAG}" \
+            --body "Proposes updating Codez from ${CURRENT_TAG} to ${LATEST_TAG}. This PR is intentionally not auto-merged; resolve branding/state-isolation conflicts and run the Codez test matrix before merging."
+
+      - name: No update available
+        if: steps.upstream.outputs.needs_update != 'true'
+        run: echo "Codez already tracks ${{ steps.upstream.outputs.current }}."

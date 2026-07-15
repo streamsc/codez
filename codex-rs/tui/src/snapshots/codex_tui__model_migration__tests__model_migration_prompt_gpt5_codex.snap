@@ -1,9 +1,10 @@
 ---
 source: tui/src/model_migration.rs
+assertion_line: 507
 expression: terminal.backend()
 ---
 
-> Codex just got an upgrade. Introducing gpt-5.1-codex-max.
+> Codez just got an upgrade. Introducing gpt-5.1-codex-max.
 
   We recommend switching from gpt-5-codex to
   gpt-5.1-codex-max.

@@ -1,5 +1,6 @@
 ---
 source: tui/src/external_agent_config_migration_flow_tests.rs
+assertion_line: 163
 expression: messages
 ---
 • Claude Code import started. You can keep working while it finishes.
@@ -34,6 +35,6 @@ expression: messages
     Plugins: 1 imported, 1 failed
   Run /import again to check for additional items.
 No Claude Code setup was found to import.
-Import from Claude Code is unavailable in remote sessions. Start Codex locally and run /import.
-Import from Claude Code is unavailable while Codex is connected to the local app-server daemon. Stop the daemon, restart Codex, and run /import.
+Import from Claude Code is unavailable in remote sessions. Start Codez locally and run /import.
+Import from Claude Code is unavailable while Codez is connected to the local app-server daemon. Stop the daemon, restart Codez, and run /import.
 A previous Claude Code import is still running. Wait for it to finish before importing again.

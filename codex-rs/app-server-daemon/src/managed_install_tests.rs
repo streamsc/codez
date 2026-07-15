@@ -1,19 +1,33 @@
 use pretty_assertions::assert_eq;
+use std::path::Path;
 
 use super::executable_identity_from_bytes;
+use super::managed_codex_bin;
 use super::parse_codex_version;
+
+#[test]
+fn managed_binary_uses_codez_private_install_root() {
+    assert_eq!(
+        managed_codex_bin(Path::new("/tmp/.codex")),
+        Path::new("/tmp/.codex/packages/codez/current/bin/codez")
+    );
+}
 
 #[test]
 fn parses_codex_cli_version_output() {
     assert_eq!(
-        parse_codex_version("codex 1.2.3\n").expect("version"),
+        parse_codex_version("codez 1.2.3-r4\n").expect("version"),
+        "1.2.3-r4"
+    );
+    assert_eq!(
+        parse_codex_version("codez 1.2.3\n").expect("version"),
         "1.2.3"
     );
 }
 
 #[test]
 fn rejects_malformed_codex_cli_version_output() {
-    assert!(parse_codex_version("codex\n").is_err());
+    assert!(parse_codex_version("codez\n").is_err());
 }
 
 #[test]
