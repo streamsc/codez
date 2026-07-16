@@ -180,5 +180,5 @@ mv "$tmp_bin" "$BIN_PATH"
 
 "$BIN_PATH" --version
 echo
- "==> Installed Codez at $BIN_PATH"
+echo "==> Installed Codez at $BIN_PATH"
 echo "==> Internal helper remains private at $CURRENT_LINK/bin/codex-code-mode-host"

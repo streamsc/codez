@@ -49,6 +49,12 @@ class InstallCodezShTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("codez 0.144.4-r1", result.stdout)
+            self.assertIn(
+                f"==> Installed Codez at {public_bin / 'codez'}", result.stdout
+            )
+            self.assertIn(
+                "==> Internal helper remains private at ", result.stdout
+            )
             self.assertTrue((public_bin / "codez").is_symlink())
             self.assertFalse((public_bin / "codex-code-mode-host").exists())
 
