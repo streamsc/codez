@@ -1,5 +1,7 @@
 # Codez
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Codez is a minimal, upstream-compatible fork of the [OpenAI Codex CLI](https://github.com/openai/codex). It keeps Codex internals and local data formats intact while exposing the product as `codez`.
 
 Codez tracks upstream Codex releases and publishes unsigned packages for macOS Apple Silicon and Linux x86_64/ARM64.
@@ -35,9 +37,9 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c codez-offline-bundle_SHA256SUMS
 fi
-tar -xzf codez-offline-v0.144.4-r6.tar.gz
-./codez-offline-v0.144.4-r6/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.144.4-r6
+tar -xzf codez-offline-v0.144.4-r7.tar.gz
+./codez-offline-v0.144.4-r7/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r7
 ```
 
 The offline installer selects the matching macOS Apple Silicon, Linux x86_64,
