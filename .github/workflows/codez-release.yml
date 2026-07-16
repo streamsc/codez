@@ -13,13 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  macos-arm64:
-    runs-on: macos-15
-    timeout-minutes: 90
-    env:
-      TARGET: aarch64-apple-darwin
-      ARCHIVE: codez-package-aarch64-apple-darwin.tar.gz
-      CHECKSUMS: codez-package_SHA256SUMS
+  tag-check:
+    runs-on: ubuntu-24.04
+    outputs:
+      display: ${{ steps.version.outputs.display }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -39,48 +36,254 @@ jobs:
             || { echo "Tag upstream version ${upstream_version} != Cargo ${cargo_version}" >&2; exit 1; }
           echo "display=${upstream_version}-r${revision}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify Apple Silicon runner
+  build:
+    needs: tag-check
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      ARCHIVE: codez-package-${{ matrix.target }}.tar.gz
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      SCCACHE_CACHE_SIZE: 2G
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            is_linux: false
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            is_linux: true
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            is_linux: true
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify runner architecture
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(uname -m)" == "arm64" ]] || { echo "Expected arm64 runner" >&2; exit 1; }
+          case "${TARGET}" in
+            aarch64-apple-darwin | aarch64-unknown-linux-musl)
+              [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]] \
+                || { echo "Expected an ARM64 runner for ${TARGET}" >&2; exit 1; }
+              ;;
+            x86_64-unknown-linux-musl)
+              [[ "$(uname -m)" == "x86_64" ]] \
+                || { echo "Expected an x86_64 runner for ${TARGET}" >&2; exit 1; }
+              ;;
+          esac
+
+      - name: Compute cache keys
+        id: cache-keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
+          echo "lock=$(hash_file codex-rs/Cargo.lock)" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(hash_file codex-rs/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cargo dependency cache
+        id: cargo-cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}
+          restore-keys: |
+            cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
+
+      - name: Restore sccache cache
+        id: sccache-cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-
+            sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
+
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Enable sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: ${{ matrix.is_linux }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        if: ${{ matrix.is_linux }}
+        shell: bash
+        run: bash .github/scripts/install-musl-build-tools.sh
+
+      - name: Disable aws-lc jitter entropy
+        if: ${{ matrix.is_linux }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
 
       - name: Configure verified rusty_v8 artifacts
         uses: ./.github/actions/setup-rusty-v8
         with:
-          target: aarch64-apple-darwin
+          target: ${{ matrix.target }}
+
+      - name: Build bundled bwrap
+        if: ${{ matrix.is_linux }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --manifest-path codex-rs/Cargo.toml \
+            --target "${TARGET}" \
+            --release \
+            --bin bwrap
+          bwrap_path="codex-rs/target/${TARGET}/release/bwrap"
+          strip --strip-debug --strip-unneeded "${bwrap_path}"
+          digest="$(sha256sum "${bwrap_path}" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "$GITHUB_ENV"
 
       - name: Build unsigned Codez package
         shell: bash
         env:
-          CODEZ_VERSION: ${{ steps.version.outputs.display }}
+          CODEZ_VERSION: ${{ needs.tag-check.outputs.display }}
         run: |
           set -euo pipefail
+          package_args=()
+          if [[ "${{ matrix.is_linux }}" == "true" ]]; then
+            package_args+=(--bwrap-bin "codex-rs/target/${TARGET}/release/bwrap")
+          fi
           mkdir -p dist
           python3 scripts/build_codex_package.py \
             --variant codez \
             --target "${TARGET}" \
             --cargo-profile release \
-            --package-dir dist/codez-package \
+            --package-dir "dist/codez-package-${TARGET}" \
             --archive-output "dist/${ARCHIVE}" \
-            --force
+            --force \
+            "${package_args[@]}"
 
-          test -x dist/codez-package/bin/codez
-          test -x dist/codez-package/bin/codex-code-mode-host
-          [[ "$(dist/codez-package/bin/codez --version)" == "codez ${{ steps.version.outputs.display }}" ]]
+          package_dir="dist/codez-package-${TARGET}"
+          test -x "${package_dir}/bin/codez"
+          test -x "${package_dir}/bin/codex-code-mode-host"
+          [[ "$("${package_dir}/bin/codez" --version)" == "codez ${{ needs.tag-check.outputs.display }}" ]]
+          if [[ "${{ matrix.is_linux }}" == "true" ]]; then
+            test -x "${package_dir}/codex-resources/bwrap"
+            "${package_dir}/codex-resources/bwrap" --version
+          fi
 
-      - name: Generate release checksums
+      - name: Upload Codez package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codez-package-${{ matrix.target }}
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+      - name: Save Cargo dependency cache
+        if: always() && !cancelled() && steps.cargo-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}
+
+      - name: Save sccache cache
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-${{ github.run_id }}
+
+      - name: Report sccache statistics
+        if: always() && !cancelled()
+        continue-on-error: true
+        shell: bash
+        run: |
+          {
+            echo "### sccache statistics — ${TARGET}"
+            echo
+            echo '```'
+            sccache --show-stats || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs:
+      - tag-check
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download Codez packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: codez-package-*
+          merge-multiple: true
+          path: dist
+
+      - name: Prepare release assets
         shell: bash
         run: |
           set -euo pipefail
-          cd dist
-          shasum -a 256 "${ARCHIVE}" > "${CHECKSUMS}"
-          cp ../scripts/install/install-codez.sh install-codez.sh
-          chmod 0755 install-codez.sh
+          expected=(
+            codez-package-aarch64-apple-darwin.tar.gz
+            codez-package-aarch64-unknown-linux-musl.tar.gz
+            codez-package-x86_64-unknown-linux-musl.tar.gz
+          )
+          for archive in "${expected[@]}"; do
+            test -f "dist/${archive}"
+          done
+          (
+            cd dist
+            sha256sum "${expected[@]}" > codez-package_SHA256SUMS
+          )
+          cp scripts/install/install-codez.sh dist/install-codez.sh
+          chmod 0755 dist/install-codez.sh
 
       - name: Publish unsigned GitHub release
         shell: bash
@@ -89,9 +292,11 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" \
-            "dist/${ARCHIVE}" \
-            "dist/${CHECKSUMS}" \
-            "dist/install-codez.sh" \
-            --title "Codez ${{ steps.version.outputs.display }}" \
+            dist/codez-package-aarch64-apple-darwin.tar.gz \
+            dist/codez-package-aarch64-unknown-linux-musl.tar.gz \
+            dist/codez-package-x86_64-unknown-linux-musl.tar.gz \
+            dist/codez-package_SHA256SUMS \
+            dist/install-codez.sh \
+            --title "Codez ${{ needs.tag-check.outputs.display }}" \
             --generate-notes \
             --verify-tag

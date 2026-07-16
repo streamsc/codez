@@ -2,7 +2,7 @@
 
 Codez is a minimal, upstream-compatible fork of the [OpenAI Codex CLI](https://github.com/openai/codex). It keeps Codex internals and local data formats intact while exposing the product as `codez`.
 
-The first Codez release tracks upstream `rust-v0.144.4` and supports unsigned macOS Apple Silicon packages.
+Codez tracks upstream Codex releases and publishes unsigned packages for macOS Apple Silicon and Linux x86_64/ARM64.
 
 ## Install
 
@@ -10,6 +10,12 @@ The first Codez release tracks upstream `rust-v0.144.4` and supports unsigned ma
 curl -fsSL https://github.com/streamsc/codez/releases/latest/download/install-codez.sh | sh
 codez
 ```
+
+The installer detects the current platform and downloads one of these release packages:
+
+- `codez-package-aarch64-apple-darwin.tar.gz`
+- `codez-package-x86_64-unknown-linux-musl.tar.gz`
+- `codez-package-aarch64-unknown-linux-musl.tar.gz`
 
 The installer accepts the existing Codex environment controls:
 
@@ -57,7 +63,25 @@ CODEZ_VERSION=0.144.4-r1 python3 scripts/build_codex_package.py \
   --archive-output dist/codez-package-aarch64-apple-darwin.tar.gz
 ```
 
-Tags use `codez-v<upstream-version>-r<N>`, for example `codez-v0.144.4-r1`. The release workflow builds an unsigned macOS ARM64 archive and checksum. The scheduled upstream workflow detects stable `rust-vX.Y.Z` tags and opens a review PR without auto-merging.
+Linux releases use musl and include a bundled `bwrap`. Build `bwrap` first, finalize its bytes, and pass its digest into the Codez build:
+
+```shell
+TARGET=x86_64-unknown-linux-musl
+cd codex-rs
+cargo build --target "$TARGET" --release --bin bwrap
+strip --strip-debug --strip-unneeded "target/$TARGET/release/bwrap"
+export CODEX_BWRAP_SHA256="$(sha256sum "target/$TARGET/release/bwrap" | awk '{print $1}')"
+cd ..
+CODEZ_VERSION=0.144.4-r1 python3 scripts/build_codex_package.py \
+  --variant codez \
+  --target "$TARGET" \
+  --cargo-profile release \
+  --bwrap-bin "codex-rs/target/$TARGET/release/bwrap" \
+  --package-dir "dist/codez-package-$TARGET" \
+  --archive-output "dist/codez-package-$TARGET.tar.gz"
+```
+
+Tags use `codez-v<upstream-version>-r<N>`, for example `codez-v0.144.4-r1`. The release workflow builds all three platform archives, publishes one checksum manifest, and caches Cargo dependencies and compiler outputs between runs. The scheduled upstream workflow detects stable `rust-vX.Y.Z` tags and opens a review PR without auto-merging.
 
 ## Upstream documentation
 

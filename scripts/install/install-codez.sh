@@ -11,8 +11,6 @@ CURRENT_LINK="$INSTALL_ROOT/current"
 LOCK_DIR="$INSTALL_ROOT/install.lock.d"
 BIN_PATH="$BIN_DIR/codez"
 REPOSITORY="streamsc/codez"
-TARGET="aarch64-apple-darwin"
-ASSET="codez-package-$TARGET.tar.gz"
 CHECKSUM_ASSET="codez-package_SHA256SUMS"
 
 tmp_dir=""
@@ -22,7 +20,7 @@ usage() {
   cat <<'EOF'
 Usage: install-codez.sh [--release VERSION]
 
-Installs the unsigned macOS Apple Silicon Codez release.
+Installs the Codez release for macOS Apple Silicon or Linux x86_64/ARM64.
 
 Environment:
   CODEX_RELEASE      Release to install: latest, codez-vX.Y.Z-rN, or X.Y.Z-rN.
@@ -63,6 +61,19 @@ download_text() {
     wget -q -O - "$url"
   else
     echo "curl or wget is required to install Codez." >&2
+    exit 1
+  fi
+}
+
+verify_checksum() {
+  checksum_line="$1"
+  checksum_dir="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$checksum_dir" && printf '%s\n' "$checksum_line" | sha256sum -c -)
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$checksum_dir" && printf '%s\n' "$checksum_line" | shasum -a 256 -c -)
+  else
+    echo "sha256sum or shasum is required to verify Codez." >&2
     exit 1
   fi
 }
@@ -113,18 +124,32 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ "$(uname -s)" != "Darwin" ]; then
-  echo "Codez v1 releases support macOS only." >&2
-  exit 1
-fi
-
-case "$(uname -m)" in
-  arm64 | aarch64) ;;
+system="$(uname -s)"
+machine="$(uname -m)"
+case "$system:$machine" in
+  Darwin:arm64 | Darwin:aarch64)
+    TARGET="aarch64-apple-darwin"
+    ;;
+  Linux:x86_64 | Linux:amd64)
+    TARGET="x86_64-unknown-linux-musl"
+    ;;
+  Linux:arm64 | Linux:aarch64)
+    TARGET="aarch64-unknown-linux-musl"
+    ;;
+  Darwin:*)
+    echo "Codez releases support Apple Silicon macOS only; detected $machine." >&2
+    exit 1
+    ;;
+  Linux:*)
+    echo "Codez releases support x86_64 and ARM64 Linux only; detected $machine." >&2
+    exit 1
+    ;;
   *)
-    echo "Codez v1 releases support Apple Silicon only." >&2
+    echo "Codez releases support macOS and Linux only; detected $system/$machine." >&2
     exit 1
     ;;
 esac
+ASSET="codez-package-$TARGET.tar.gz"
 
 tag="$(resolve_tag "$RELEASE")"
 release_url="https://github.com/$REPOSITORY/releases/download/$tag"
@@ -150,7 +175,7 @@ if [ -z "$checksum_line" ]; then
   echo "Checksum manifest does not contain $ASSET." >&2
   exit 1
 fi
-(cd "$tmp_dir" && printf '%s\n' "$checksum_line" | shasum -a 256 -c -)
+verify_checksum "$checksum_line" "$tmp_dir"
 
 stage_dir="$RELEASES_DIR/.staging.$$"
 rm -rf "$stage_dir"
@@ -164,6 +189,13 @@ for required in bin/codez bin/codex-code-mode-host codex-package.json; do
   fi
 done
 chmod 0755 "$stage_dir/bin/codez" "$stage_dir/bin/codex-code-mode-host"
+if [ "$system" = "Linux" ]; then
+  if [ ! -f "$stage_dir/codex-resources/bwrap" ]; then
+    echo "Linux release archive is missing codex-resources/bwrap." >&2
+    exit 1
+  fi
+  chmod 0755 "$stage_dir/codex-resources/bwrap"
+fi
 
 rm -rf "$release_dir"
 mv "$stage_dir" "$release_dir"
