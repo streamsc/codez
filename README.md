@@ -23,6 +23,28 @@ The installer accepts the existing Codex environment controls:
 - `CODEX_INSTALL_DIR` selects the public command directory (default `~/.local/bin`).
 - `CODEX_RELEASE` pins a release such as `codez-v0.144.4-r1`.
 
+### Offline install
+
+Each Codez release also publishes a multi-platform offline bundle. Copy
+`codez-offline-vX.Y.Z-rN.tar.gz` and `codez-offline-bundle_SHA256SUMS` to the
+offline machine, verify the outer bundle checksum, and extract the bundle:
+
+```shell
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c codez-offline-bundle_SHA256SUMS
+else
+  shasum -a 256 -c codez-offline-bundle_SHA256SUMS
+fi
+tar -xzf codez-offline-v0.144.4-r6.tar.gz
+./codez-offline-v0.144.4-r6/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r6
+```
+
+The offline installer selects the matching macOS Apple Silicon, Linux x86_64,
+or Linux ARM64 package, verifies its bundled SHA-256 entry, and installs it
+without contacting GitHub. It accepts the same `CODEX_HOME` and
+`CODEX_INSTALL_DIR` environment variables as the online installer.
+
 ## Codex compatibility and coexistence
 
 Codez intentionally shares these Codex surfaces:

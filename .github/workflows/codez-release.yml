@@ -40,14 +40,13 @@ jobs:
     needs: tag-check
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
       ARCHIVE: codez-package-${{ matrix.target }}.tar.gz
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       SCCACHE_CACHE_SIZE: 2G
-      SCCACHE_DIR: ${{ github.workspace }}/.sccache
       TARGET: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -110,20 +109,24 @@ jobs:
           restore-keys: |
             cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
 
-      - name: Restore sccache cache
-        id: sccache-cache
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-${{ github.run_id }}
-          restore-keys: |
-            sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-
-            sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
-
       - name: Install sccache
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
 
       - name: Enable sccache
         shell: bash
@@ -131,6 +134,17 @@ jobs:
           set -euo pipefail
           echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+
+      - name: Restore sccache cache (fallback)
+        if: ${{ env.SCCACHE_GHA_ENABLED != 'true' }}
+        id: sccache-cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-
+            sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -224,12 +238,12 @@ jobs:
             ~/.cargo/git/db/
           key: cargo-home-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}
 
-      - name: Save sccache cache
-        if: always() && !cancelled()
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          path: ${{ env.SCCACHE_DIR }}
+          path: ${{ github.workspace }}/.sccache/
           key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ steps.cache-keys.outputs.lock }}-${{ steps.cache-keys.outputs.toolchain }}-${{ github.run_id }}
 
       - name: Report sccache statistics
@@ -282,6 +296,18 @@ jobs:
           )
           cp scripts/install/install-codez.sh dist/install-codez.sh
           chmod 0755 dist/install-codez.sh
+          cp scripts/install/install-codez-offline.sh dist/install-codez-offline.sh
+          chmod 0755 dist/install-codez-offline.sh
+          python3 scripts/build_codez_offline_bundle.py \
+            --release-tag "${GITHUB_REF_NAME}" \
+            --asset-dir dist \
+            --installer scripts/install/install-codez-offline.sh \
+            --output "dist/codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz" \
+            --force
+          (
+            cd dist
+            sha256sum "codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz" > codez-offline-bundle_SHA256SUMS
+          )
 
       - name: Publish unsigned GitHub release
         shell: bash
@@ -295,6 +321,9 @@ jobs:
             dist/codez-package-x86_64-unknown-linux-musl.tar.gz \
             dist/codez-package_SHA256SUMS \
             dist/install-codez.sh \
+            dist/codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz \
+            dist/codez-offline-bundle_SHA256SUMS \
+            dist/install-codez-offline.sh \
             --title "Codez ${{ needs.tag-check.outputs.display }}" \
             --generate-notes \
             --verify-tag
