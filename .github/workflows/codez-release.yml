@@ -123,8 +123,7 @@ jobs:
       - name: Install sccache
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: sccache
-          version: 0.7.5
+          tool: sccache@0.7.5
 
       - name: Enable sccache
         shell: bash
@@ -185,7 +184,7 @@ jobs:
           CODEZ_VERSION: ${{ needs.tag-check.outputs.display }}
         run: |
           set -euo pipefail
-          package_args=()
+          package_args=(--force)
           if [[ "${{ matrix.is_linux }}" == "true" ]]; then
             package_args+=(--bwrap-bin "codex-rs/target/${TARGET}/release/bwrap")
           fi
@@ -196,7 +195,6 @@ jobs:
             --cargo-profile release \
             --package-dir "dist/codez-package-${TARGET}" \
             --archive-output "dist/${ARCHIVE}" \
-            --force \
             "${package_args[@]}"
 
           package_dir="dist/codez-package-${TARGET}"
