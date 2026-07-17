@@ -161,13 +161,15 @@ install_from_bundle() {
 
   package_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$stage_dir/codex-package.json" | head -n 1)"
   package_variant="$(sed -n 's/.*"variant"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$stage_dir/codex-package.json" | head -n 1)"
+  release_version="${release_tag#codez-v}"
+  upstream_version="${release_version%-r*}"
   [ "$package_variant" = codez ] || fail "Release archive is not a Codez package."
-  [ "$package_version" = "${release_tag#codez-v}" ] \
-    || fail "Package version does not match manifest release tag."
+  [ "$package_version" = "$upstream_version" ] \
+    || fail "Package metadata version does not match manifest upstream version."
   chmod 0755 "$stage_dir/bin/codez" "$stage_dir/bin/codex-code-mode-host" "$stage_dir/codex-path/rg"
   if [ "$system" = Linux ]; then chmod 0755 "$stage_dir/codex-resources/bwrap"; fi
   reported_version="$("$stage_dir/bin/codez" --version)"
-  [ "$reported_version" = "codez $package_version" ] \
+  [ "$reported_version" = "codez $release_version" ] \
     || fail "Packaged Codez binary did not report the expected version."
 
   release_dir="$RELEASES_DIR/${release_tag#codez-v}-$TARGET"

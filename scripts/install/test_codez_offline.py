@@ -15,6 +15,7 @@ INSTALLER = REPO_ROOT / "scripts/install/install-codez-offline.sh"
 BUILDER = REPO_ROOT / "scripts/build_codez_offline_bundle.py"
 TAG = "codez-v0.144.4-r1"
 VERSION = "0.144.4-r1"
+UPSTREAM_VERSION = "0.144.4"
 TARGETS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
     ("Linux", "x86_64", "x86_64-unknown-linux-musl", True),
@@ -228,7 +229,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                 "bin/codex-code-mode-host": b"#!/bin/sh\nexit 0\n",
                 "codex-path/rg": b"#!/bin/sh\nexit 0\n",
                 "codex-package.json": (
-                    f'{{"version":"{VERSION}","variant":"codez"}}\n'.encode()
+                    f'{{"version":"{UPSTREAM_VERSION}","variant":"codez"}}\n'.encode()
                 ),
             }
             if is_linux:

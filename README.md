@@ -37,9 +37,9 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c codez-offline-bundle_SHA256SUMS
 fi
-tar -xzf codez-offline-v0.144.4-r7.tar.gz
-./codez-offline-v0.144.4-r7/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.144.4-r7
+tar -xzf codez-offline-v0.144.4-r8.tar.gz
+./codez-offline-v0.144.4-r8/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r8
 ```
 
 The offline installer selects the matching macOS Apple Silicon, Linux x86_64,
