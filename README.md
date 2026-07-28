@@ -47,6 +47,30 @@ or Linux ARM64 package, verifies its bundled SHA-256 entry, and installs it
 without contacting GitHub. It accepts the same `CODEX_HOME` and
 `CODEX_INSTALL_DIR` environment variables as the online installer.
 
+To configure the installed Codez for an internal OpenAI-compatible Responses
+API and skip the first-run login screen, provide the full API root and API key:
+
+```shell
+./codez-offline-v0.144.4-r8/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r8 \
+  --api-base-url https://gateway.internal/v1 \
+  --api-key sk-internal \
+  --model internal-model
+```
+
+`--model` is optional. The installer validates the URL without contacting the
+service, preserves unrelated settings in `CODEX_HOME/config.toml`, and stores
+the API key through Codez's normal API-key login flow rather than in
+`config.toml`. The service must expose the Responses API at
+`{api-base-url}/responses`; a Chat Completions-only gateway is not sufficient.
+HTTP endpoints are accepted with a warning because the API key will be sent
+without transport encryption.
+
+Passing `--api-key` can expose the secret in shell history and process listings.
+The installer does not echo it or forward it in the child Codez command line.
+Because Codez and Codex share `CODEX_HOME`, this configuration is also visible
+to Codex when both products use the same home directory.
+
 ## Codex compatibility and coexistence
 
 Codez intentionally shares these Codex surfaces:

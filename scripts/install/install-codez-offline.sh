@@ -10,13 +10,37 @@ BIN_DIR=""
 BIN_PATH=""
 tmp_dir=""
 stage_dir=""
+release_dir=""
+rollback_dir=""
 lock_acquired=false
+rollback_active=false
+api_config_requested=false
+api_base_url=""
+api_key=""
+model=""
+xtrace_was_enabled=false
+
+case "$-" in
+  *x*)
+    xtrace_was_enabled=true
+    set +x
+    ;;
+esac
 
 usage() {
   cat <<'EOF'
-Usage: install-codez-offline.sh --bundle PATH
+Usage: install-codez-offline.sh --bundle PATH [API OPTIONS]
 
 Installs Codez from a local offline bundle directory or .tar.gz archive.
+
+API options:
+  --api-base-url URL  Full OpenAI-compatible API root, such as https://host/v1.
+  --api-key KEY       API key to store using Codez's configured credential store.
+  --model MODEL       Optional default model for new sessions.
+
+--api-base-url and --api-key must be provided together. Supplying --api-key can
+expose the key in shell history and process listings. The installer never passes
+the key to child processes as a command-line argument.
 
 Environment:
   CODEX_INSTALL_DIR  Directory for the public codez symlink (default: ~/.local/bin).
@@ -25,6 +49,10 @@ EOF
 }
 
 cleanup() {
+  set +e
+  if [ "$rollback_active" = true ]; then
+    rollback_install
+  fi
   if [ -n "$tmp_dir" ] && [ -d "$tmp_dir" ]; then
     rm -rf "$tmp_dir"
   fi
@@ -34,6 +62,9 @@ cleanup() {
   if [ "$lock_acquired" = true ]; then
     rmdir "$LOCK_DIR" 2>/dev/null || true
   fi
+  if [ -n "$rollback_dir" ] && [ -d "$rollback_dir" ]; then
+    rm -rf "$rollback_dir"
+  fi
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -41,6 +72,67 @@ trap cleanup EXIT HUP INT TERM
 fail() {
   echo "Offline Codez installation failed: $*" >&2
   exit 1
+}
+
+warn() {
+  echo "Warning: $*" >&2
+}
+
+snapshot_path() {
+  path="$1"
+  name="$2"
+  if [ -L "$path" ]; then
+    readlink "$path" >"$rollback_dir/$name.symlink"
+  elif [ -f "$path" ]; then
+    cp -p "$path" "$rollback_dir/$name.file"
+  elif [ -e "$path" ]; then
+    fail "Cannot safely snapshot existing path: $path"
+  else
+    : >"$rollback_dir/$name.absent"
+  fi
+}
+
+restore_path() {
+  path="$1"
+  name="$2"
+  rm -f "$path"
+  if [ -f "$rollback_dir/$name.symlink" ]; then
+    mkdir -p "$(dirname "$path")"
+    ln -s "$(cat "$rollback_dir/$name.symlink")" "$path"
+  elif [ -f "$rollback_dir/$name.file" ]; then
+    mkdir -p "$(dirname "$path")"
+    cp -p "$rollback_dir/$name.file" "$path"
+  fi
+}
+
+prepare_rollback() {
+  rollback_dir="$(mktemp -d "$INSTALL_ROOT/.rollback.XXXXXX")"
+  chmod 0700 "$rollback_dir"
+  snapshot_path "$CURRENT_LINK" current
+  snapshot_path "$BIN_PATH" public-bin
+  snapshot_path "$CODEX_HOME_DIR/config.toml" config
+  snapshot_path "$CODEX_HOME_DIR/auth.json" auth
+  rollback_active=true
+}
+
+rollback_install() {
+  if [ -n "$release_dir" ]; then
+    rm -rf "$release_dir"
+    if [ -d "$rollback_dir/release-dir" ]; then
+      mv "$rollback_dir/release-dir" "$release_dir"
+    fi
+  fi
+  restore_path "$CURRENT_LINK" current
+  restore_path "$BIN_PATH" public-bin
+  restore_path "$CODEX_HOME_DIR/config.toml" config
+  restore_path "$CODEX_HOME_DIR/auth.json" auth
+  rollback_active=false
+}
+
+commit_install() {
+  rollback_active=false
+  rm -rf "$rollback_dir"
+  rollback_dir=""
 }
 
 sha256_verify() {
@@ -173,7 +265,11 @@ install_from_bundle() {
     || fail "Packaged Codez binary did not report the expected version."
 
   release_dir="$RELEASES_DIR/${release_tag#codez-v}-$TARGET"
-  rm -rf "$release_dir"
+  if [ "$rollback_active" = true ] && [ -e "$release_dir" ]; then
+    mv "$release_dir" "$rollback_dir/release-dir"
+  else
+    rm -rf "$release_dir"
+  fi
   mv "$stage_dir" "$release_dir"
   stage_dir=""
 
@@ -189,11 +285,38 @@ install_from_bundle() {
 }
 
 bundle_path=""
+bundle_seen=false
+api_base_url_seen=false
+api_key_seen=false
+model_seen=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bundle)
       [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+      [ "$bundle_seen" = false ] || fail "--bundle may only be specified once."
       bundle_path="$2"
+      bundle_seen=true
+      shift 2
+      ;;
+    --api-base-url)
+      [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+      [ "$api_base_url_seen" = false ] || fail "--api-base-url may only be specified once."
+      api_base_url="$2"
+      api_base_url_seen=true
+      shift 2
+      ;;
+    --api-key)
+      [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+      [ "$api_key_seen" = false ] || fail "--api-key may only be specified once."
+      api_key="$2"
+      api_key_seen=true
+      shift 2
+      ;;
+    --model)
+      [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+      [ "$model_seen" = false ] || fail "--model may only be specified once."
+      model="$2"
+      model_seen=true
       shift 2
       ;;
     --help|-h)
@@ -208,6 +331,25 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$bundle_path" ] || { usage >&2; exit 1; }
+
+if [ "$api_base_url_seen" = true ] || [ "$api_key_seen" = true ] || [ "$model_seen" = true ]; then
+  [ "$api_base_url_seen" = true ] || fail "--api-base-url is required when configuring an API."
+  [ "$api_key_seen" = true ] || fail "--api-key is required when configuring an API."
+  [ -n "$api_base_url" ] || fail "--api-base-url must not be empty."
+  [ -n "$api_key" ] || fail "--api-key must not be empty."
+  if [ "$model_seen" = true ]; then
+    [ -n "$model" ] || fail "--model must not be empty."
+  fi
+  api_config_requested=true
+  warn "--api-key can be exposed by shell history and process listings."
+  case "$api_base_url" in
+    [Hh][Tt][Tt][Pp]://*)
+      warn "the API key will be transmitted over unencrypted HTTP."
+      ;;
+  esac
+elif [ "$xtrace_was_enabled" = true ]; then
+  set -x
+fi
 
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
@@ -225,7 +367,35 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 lock_acquired=true
 
+if [ "$api_config_requested" = true ]; then
+  prepare_rollback
+fi
 install_from_bundle
+
+if [ "$api_config_requested" = true ]; then
+  if [ "$model_seen" = true ]; then
+    if ! printf '%s\n' "$api_key" | "$BIN_PATH" offline-api-bootstrap \
+      --api-base-url "$api_base_url" --model "$model"
+    then
+      api_key=""
+      fail "Codez could not save the internal API configuration."
+    fi
+  elif ! printf '%s\n' "$api_key" | "$BIN_PATH" offline-api-bootstrap \
+    --api-base-url "$api_base_url"
+  then
+    api_key=""
+    fail "Codez could not save the internal API configuration."
+  fi
+  api_key=""
+  commit_install
+fi
+
 echo
 echo "==> Installed Codez offline at $BIN_PATH"
 echo "==> Internal helper remains private at $CURRENT_LINK/bin/codex-code-mode-host"
+if [ "$api_config_requested" = true ]; then
+  echo "==> Configured API endpoint: $api_base_url"
+  if [ "$model_seen" = true ]; then
+    echo "==> Configured default model: $model"
+  fi
+fi

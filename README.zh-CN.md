@@ -2,9 +2,15 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Codez 是 [OpenAI Codex CLI](https://github.com/openai/codex) 的精简分支，并与上游保持兼容。它保留 Codex 的内部实现和本地数据格式，同时以 `codez` 的名称对外提供产品。
+Codez 基于开源项目 [OpenAI Codex CLI](https://github.com/openai/codex)，并与上游保持兼容。它保留 Codex 的内部实现和本地数据格式，同时以 `codez` 的名称对外提供产品。
 
 Codez 跟踪上游 Codex 版本，并为 macOS Apple Silicon 以及 Linux x86_64/ARM64 发布未签名的软件包。
+
+## 主要特点
+
+- 与上游 Codex 保持兼容，共享配置、认证信息、本地会话和其他数据格式。
+- 支持 macOS Apple Silicon、Linux x86_64 和 Linux ARM64。
+- 提供多平台离线安装包，为无网络、受限网络或隔离环境提供安装支持。
 
 ## 安装
 
@@ -44,6 +50,26 @@ tar -xzf codez-offline-v0.144.4-r8.tar.gz
 离线安装程序会选择对应的 macOS Apple Silicon、Linux x86_64 或 Linux ARM64 软件包，
 根据包内的 SHA-256 记录进行校验，并在不连接 GitHub 的情况下完成安装。它支持与在线安装程序相同的
 `CODEX_HOME` 和 `CODEX_INSTALL_DIR` 环境变量。
+
+如果需要在安装时直接配置内网 OpenAI 兼容 Responses API，并跳过首次启动的登录界面，
+可传入完整 API 根地址和 API Key：
+
+```shell
+./codez-offline-v0.144.4-r8/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r8 \
+  --api-base-url https://gateway.internal/v1 \
+  --api-key sk-internal \
+  --model internal-model
+```
+
+`--model` 可选。安装器只校验 URL 格式，不会连接内网服务；它会保留
+`CODEX_HOME/config.toml` 中的其他设置，并通过 Codez 正常的 API Key 登录流程存储密钥，
+不会将密钥写入 `config.toml`。内网服务必须在 `{api-base-url}/responses` 提供 Responses API；
+仅支持 Chat Completions 的网关不能使用。HTTP 地址仍可配置，但安装器会警告 API Key 将以未加密方式传输。
+
+通过 `--api-key` 传入密钥可能使它出现在 shell 历史和进程列表中。安装器不会回显密钥，
+也不会将密钥放入子 Codez 进程的命令行。由于 Codez 和 Codex 共享 `CODEX_HOME`，
+两者使用同一目录时都会读取这些 API 配置和认证。
 
 ## Codex 兼容性与共存
 

@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -163,6 +164,244 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                 failed_asset.stderr,
             )
 
+    def test_configures_internal_api_without_exposing_key_to_child_arguments(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_dir = self._build_extracted_bundle(root)
+            codez_home = root / "codex-home"
+            public_bin = root / "bin"
+            secret = "sk-offline-secret"
+
+            result = self._run_installer(
+                bundle_dir,
+                codez_home,
+                public_bin,
+                "Linux",
+                "x86_64",
+                extra_args=(
+                    "--api-base-url",
+                    "https://gateway.internal/v1",
+                    "--api-key",
+                    secret,
+                    "--model",
+                    "internal-model",
+                ),
+                shell_xtrace=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn(secret, result.stdout)
+            self.assertNotIn(secret, result.stderr)
+            self.assertIn(
+                "--api-key can be exposed by shell history and process listings",
+                result.stderr,
+            )
+            self.assertIn(
+                "==> Configured API endpoint: https://gateway.internal/v1",
+                result.stdout,
+            )
+            self.assertIn("==> Configured default model: internal-model", result.stdout)
+            child_args = (codez_home / "bootstrap-args").read_text(encoding="utf-8")
+            self.assertNotIn(secret, child_args)
+            self.assertEqual(
+                child_args.splitlines(),
+                [
+                    "--api-base-url",
+                    "https://gateway.internal/v1",
+                    "--model",
+                    "internal-model",
+                ],
+            )
+            self.assertEqual(
+                (codez_home / "bootstrap-key").read_text(encoding="utf-8"), secret
+            )
+            auth_path = codez_home / "auth.json"
+            self.assertEqual(stat.S_IMODE(auth_path.stat().st_mode), 0o600)
+            self.assertNotIn("network-used", result.stderr)
+
+    def test_http_api_warns_and_model_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle_dir = self._build_extracted_bundle(root)
+            codez_home = root / "codex-home"
+            result = self._run_installer(
+                bundle_dir,
+                codez_home,
+                root / "bin",
+                "Linux",
+                "x86_64",
+                extra_args=(
+                    "--api-base-url",
+                    "http://gateway.internal/v1",
+                    "--api-key",
+                    "sk-test",
+                ),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "API key will be transmitted over unencrypted HTTP",
+                result.stderr,
+            )
+            self.assertNotIn("Configured default model", result.stdout)
+            self.assertNotIn("--model", (codez_home / "bootstrap-args").read_text())
+
+    def test_api_argument_validation_happens_before_bundle_access(self) -> None:
+        cases = (
+            (
+                ("--api-base-url", "https://gateway.internal/v1"),
+                "--api-key is required",
+            ),
+            (("--api-key", "sk-test"), "--api-base-url is required"),
+            (("--model", "internal-model"), "--api-base-url is required"),
+            (
+                (
+                    "--api-base-url",
+                    "https://gateway.internal/v1",
+                    "--api-key",
+                    "",
+                ),
+                "--api-key must not be empty",
+            ),
+            (
+                ("--api-base-url", "", "--api-key", "sk-test"),
+                "--api-base-url must not be empty",
+            ),
+            (
+                (
+                    "--api-base-url",
+                    "https://gateway.internal/v1",
+                    "--api-key",
+                    "sk-test",
+                    "--model",
+                    "",
+                ),
+                "--model must not be empty",
+            ),
+            (("--bundle", "duplicate-bundle"), "--bundle may only be specified once"),
+            (
+                (
+                    "--api-base-url",
+                    "https://one.internal/v1",
+                    "--api-base-url",
+                    "https://two.internal/v1",
+                ),
+                "--api-base-url may only be specified once",
+            ),
+            (
+                (
+                    "--api-base-url",
+                    "https://gateway.internal/v1",
+                    "--api-key",
+                    "sk-one",
+                    "--api-key",
+                    "sk-two",
+                ),
+                "--api-key may only be specified once",
+            ),
+            (
+                (
+                    "--api-base-url",
+                    "https://gateway.internal/v1",
+                    "--api-key",
+                    "sk-test",
+                    "--model",
+                    "model-one",
+                    "--model",
+                    "model-two",
+                ),
+                "--model may only be specified once",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index, (extra_args, expected) in enumerate(cases):
+                with self.subTest(expected=expected):
+                    result = self._run_installer(
+                        root / "missing-bundle",
+                        root / f"home-{index}",
+                        root / f"bin-{index}",
+                        "Linux",
+                        "x86_64",
+                        extra_args=extra_args,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected, result.stderr)
+
+    def test_bootstrap_failures_restore_same_version_install_config_and_auth(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            old_bundle = self._build_extracted_bundle(root / "old", generation="old")
+            new_bundle = self._build_extracted_bundle(root / "new", generation="new")
+            codez_home = root / "codex-home"
+            public_bin = root / "bin"
+
+            installed = self._run_installer(
+                old_bundle,
+                codez_home,
+                public_bin,
+                "Linux",
+                "x86_64",
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            config_path = codez_home / "config.toml"
+            auth_path = codez_home / "auth.json"
+            config_path.write_text('approval_policy = "never"\n', encoding="utf-8")
+            auth_path.write_text(
+                '{"auth_mode":"api_key","OPENAI_API_KEY":"sk-old"}\n',
+                encoding="utf-8",
+            )
+            auth_path.chmod(0o600)
+            current = codez_home / "packages/codez/current"
+            previous_current = os.readlink(current)
+            previous_binary = (current / "bin/codez").read_bytes()
+            previous_config = config_path.read_bytes()
+            previous_auth = auth_path.read_bytes()
+
+            for failure_mode in ("config", "auth"):
+                with self.subTest(failure_mode=failure_mode):
+                    failed = self._run_installer(
+                        new_bundle,
+                        codez_home,
+                        public_bin,
+                        "Linux",
+                        "x86_64",
+                        extra_args=(
+                            "--api-base-url",
+                            "https://gateway.internal/v1",
+                            "--api-key",
+                            "sk-new-secret",
+                        ),
+                        extra_env={"CODEZ_TEST_BOOTSTRAP_FAIL": failure_mode},
+                    )
+
+                    self.assertNotEqual(failed.returncode, 0)
+                    self.assertNotIn("sk-new-secret", failed.stdout + failed.stderr)
+                    self.assertEqual(os.readlink(current), previous_current)
+                    self.assertEqual(
+                        (current / "bin/codez").read_bytes(), previous_binary
+                    )
+                    self.assertEqual(config_path.read_bytes(), previous_config)
+                    self.assertEqual(auth_path.read_bytes(), previous_auth)
+
+    def _build_extracted_bundle(
+        self, root: Path, *, generation: str = "default"
+    ) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        assets = root / "assets"
+        assets.mkdir()
+        self._write_assets(assets, generation=generation)
+        bundle = root / "bundle.tar.gz"
+        self._build_bundle(assets, bundle)
+        extracted = root / "extracted"
+        extracted.mkdir()
+        with tarfile.open(bundle, "r:gz") as archive:
+            archive.extractall(extracted)
+        return next(extracted.iterdir())
+
     def _build_bundle(self, assets: Path, output: Path) -> None:
         result = subprocess.run(
             [
@@ -189,6 +428,9 @@ class CodezOfflineInstallerTest(unittest.TestCase):
         public_bin: Path,
         system: str,
         machine: str,
+        extra_args: tuple[str, ...] = (),
+        extra_env: dict[str, str] | None = None,
+        shell_xtrace: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         fake_bin = codez_home.parent / "fake-bin"
         fake_bin.mkdir(parents=True, exist_ok=True)
@@ -213,19 +455,60 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             "CODEX_INSTALL_DIR": str(public_bin),
             "PATH": f"{fake_bin}:/usr/bin:/bin",
         }
+        if extra_env is not None:
+            env.update(extra_env)
+        command = [str(INSTALLER), "--bundle", str(bundle), *extra_args]
+        if shell_xtrace:
+            command = ["sh", "-x", *command]
         return subprocess.run(
-            [str(INSTALLER), "--bundle", str(bundle)],
+            command,
             capture_output=True,
             text=True,
             env=env,
         )
 
-    def _write_assets(self, assets: Path) -> None:
+    def _write_assets(self, assets: Path, *, generation: str = "default") -> None:
         checksums: list[str] = []
         for _system, _machine, target, is_linux in TARGETS:
             archive_path = assets / f"codez-package-{target}.tar.gz"
+            codez_script = f"""#!/bin/sh
+# generation: {generation}
+case "$1" in
+  --version)
+    printf 'codez {VERSION}\\n'
+    ;;
+  offline-api-bootstrap)
+    shift
+    mkdir -p "$CODEX_HOME"
+    : >"$CODEX_HOME/bootstrap-args"
+    for arg in "$@"; do
+      printf '%s\\n' "$arg" >>"$CODEX_HOME/bootstrap-args"
+    done
+    IFS= read -r api_key || true
+    printf '%s' "$api_key" >"$CODEX_HOME/bootstrap-key"
+    if [ "${{CODEZ_TEST_BOOTSTRAP_FAIL:-}}" = config ]; then
+      printf '%s\\n' 'bootstrap = "partial"' >>"$CODEX_HOME/config.toml"
+      echo 'simulated config failure' >&2
+      exit 70
+    fi
+    printf '%s\\n' 'bootstrap = "configured"' >>"$CODEX_HOME/config.toml"
+    if [ "${{CODEZ_TEST_BOOTSTRAP_FAIL:-}}" = auth ]; then
+      printf '{{"auth_mode":"api_key","OPENAI_API_KEY":"partial"}}\\n' >"$CODEX_HOME/auth.json"
+      chmod 0600 "$CODEX_HOME/auth.json"
+      echo 'simulated auth failure' >&2
+      exit 71
+    fi
+    printf '{{"auth_mode":"api_key","OPENAI_API_KEY":"%s"}}\\n' "$api_key" >"$CODEX_HOME/auth.json"
+    chmod 0600 "$CODEX_HOME/auth.json"
+    echo 'Successfully logged in' >&2
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"""
             files = {
-                "bin/codez": f"#!/bin/sh\nprintf 'codez {VERSION}\\n'\n".encode(),
+                "bin/codez": codez_script.encode(),
                 "bin/codex-code-mode-host": b"#!/bin/sh\nexit 0\n",
                 "codex-path/rg": b"#!/bin/sh\nexit 0\n",
                 "codex-package.json": (
