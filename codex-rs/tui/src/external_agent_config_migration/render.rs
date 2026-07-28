@@ -119,7 +119,7 @@ impl WidgetRef for &ExternalAgentConfigMigrationScreen {
         .areas(inner_area);
 
         let title = match self.view {
-            MigrationView::Summary => "Import from Claude Code",
+            MigrationView::Summary => "Import setup",
             MigrationView::Customize => "Choose what to import",
         };
         let heading = Line::from(vec!["> ".into(), title.bold()]);

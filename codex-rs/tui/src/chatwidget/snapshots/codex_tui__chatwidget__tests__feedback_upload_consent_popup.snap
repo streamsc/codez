@@ -8,6 +8,8 @@ expression: popup
   The following files will be sent:
     • codex-logs.log
     • codex-doctor-report.json
+    • codex-apps-tools-cache.json (if available)
+    • codex-app-directory-cache.json (if available)
     • windows-sandbox.log
     • auto-review-rollout-thread-1.jsonl
     • codex-connectivity-diagnostics.txt
