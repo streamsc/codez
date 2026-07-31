@@ -37,9 +37,9 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c codez-offline-bundle_SHA256SUMS
 fi
-tar -xzf codez-offline-v0.144.4-r8.tar.gz
-./codez-offline-v0.144.4-r8/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.144.4-r8
+tar -xzf codez-offline-v0.144.4-r9.tar.gz
+./codez-offline-v0.144.4-r9/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r9
 ```
 
 The offline installer selects the matching macOS Apple Silicon, Linux x86_64,
@@ -51,8 +51,8 @@ To configure the installed Codez for an internal OpenAI-compatible Responses
 API and skip the first-run login screen, provide the full API root and API key:
 
 ```shell
-./codez-offline-v0.144.4-r8/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.144.4-r8 \
+./codez-offline-v0.144.4-r9/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r9 \
   --api-base-url https://gateway.internal/v1 \
   --api-key sk-internal \
   --model internal-model

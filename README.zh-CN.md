@@ -42,9 +42,9 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c codez-offline-bundle_SHA256SUMS
 fi
-tar -xzf codez-offline-v0.144.4-r8.tar.gz
-./codez-offline-v0.144.4-r8/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.144.4-r8
+tar -xzf codez-offline-v0.144.4-r9.tar.gz
+./codez-offline-v0.144.4-r9/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r9
 ```
 
 离线安装程序会选择对应的 macOS Apple Silicon、Linux x86_64 或 Linux ARM64 软件包，
@@ -55,8 +55,8 @@ tar -xzf codez-offline-v0.144.4-r8.tar.gz
 可传入完整 API 根地址和 API Key：
 
 ```shell
-./codez-offline-v0.144.4-r8/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.144.4-r8 \
+./codez-offline-v0.144.4-r9/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.144.4-r9 \
   --api-base-url https://gateway.internal/v1 \
   --api-key sk-internal \
   --model internal-model
