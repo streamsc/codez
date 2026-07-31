@@ -1,9 +1,12 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
 use codex_login::CLIENT_ID;
 use codex_login::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -56,6 +59,160 @@ fn login_with_api_key_reads_stdin_and_writes_auth_json() -> Result<()> {
     assert!(auth.get("tokens").is_none());
     assert!(auth.get("agent_identity").is_none());
 
+    Ok(())
+}
+
+#[test]
+fn offline_api_bootstrap_writes_endpoint_model_and_api_key() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        "# keep this comment\ncli_auth_credentials_store = \"file\"\nmodel = \"old-model\"\nmodel_reasoning_effort = \"high\"\napproval_policy = \"never\"\n",
+    )?;
+    let secret = "sk-offline-secret";
+
+    let output = codex_command(codex_home.path())?
+        .args([
+            "offline-api-bootstrap",
+            "--api-base-url",
+            "https://gateway.internal/v1",
+            "--model",
+            "internal-model",
+        ])
+        .write_stdin(format!("{secret}\n"))
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("https://gateway.internal/v1"));
+    assert!(stdout.contains("internal-model"));
+    assert!(!stdout.contains(secret));
+    assert!(!stderr.contains(secret));
+
+    let config_text = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+    let _: toml::Value = toml::from_str(&config_text)?;
+    assert!(config_text.contains("# keep this comment"));
+    assert!(config_text.contains("openai_base_url = \"https://gateway.internal/v1\""));
+    assert!(config_text.contains("model_provider = \"openai\""));
+    assert!(config_text.contains("model = \"internal-model\""));
+    assert!(config_text.contains("model_reasoning_effort = \"high\""));
+    assert!(!config_text.contains(secret));
+
+    let auth = read_auth_json(codex_home.path())?;
+    assert_eq!(auth["OPENAI_API_KEY"], secret);
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(codex_home.path().join("auth.json"))?
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    Ok(())
+}
+
+#[test]
+fn offline_api_bootstrap_without_model_preserves_existing_model() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        "cli_auth_credentials_store = \"file\"\nmodel = \"existing-model\"\n",
+    )?;
+
+    codex_command(codex_home.path())?
+        .args([
+            "offline-api-bootstrap",
+            "--api-base-url",
+            "http://gateway.internal/v1",
+        ])
+        .write_stdin("sk-test\n")
+        .assert()
+        .success()
+        .stdout(contains("http://gateway.internal/v1"))
+        .stdout(predicates::str::contains("default model").not());
+
+    let config_text = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+    let _: toml::Value = toml::from_str(&config_text)?;
+    assert!(config_text.contains("model = \"existing-model\""));
+    assert!(config_text.contains("model_provider = \"openai\""));
+    Ok(())
+}
+
+#[test]
+fn offline_api_bootstrap_rejects_invalid_url_and_empty_key() -> Result<()> {
+    let invalid_url_home = TempDir::new()?;
+    codex_command(invalid_url_home.path())?
+        .args([
+            "offline-api-bootstrap",
+            "--api-base-url",
+            "ftp://gateway.internal/v1",
+        ])
+        .write_stdin("sk-test\n")
+        .assert()
+        .failure()
+        .stderr(contains("must use http or https"));
+    assert!(!invalid_url_home.path().join("config.toml").exists());
+
+    let empty_key_home = TempDir::new()?;
+    codex_command(empty_key_home.path())?
+        .args([
+            "offline-api-bootstrap",
+            "--api-base-url",
+            "https://gateway.internal/v1",
+        ])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stderr(contains("No API key provided via stdin"));
+    assert!(!empty_key_home.path().join("config.toml").exists());
+    Ok(())
+}
+
+#[test]
+fn offline_api_bootstrap_respects_forced_chatgpt_login() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+
+    codex_command(codex_home.path())?
+        .args([
+            "-c",
+            "forced_login_method=\"chatgpt\"",
+            "offline-api-bootstrap",
+            "--api-base-url",
+            "https://gateway.internal/v1",
+        ])
+        .write_stdin("sk-test\n")
+        .assert()
+        .failure()
+        .stderr(contains("forced to ChatGPT"));
+
+    assert_eq!(
+        std::fs::read_to_string(codex_home.path().join("config.toml"))?,
+        "cli_auth_credentials_store = \"file\"\n"
+    );
+    assert!(!codex_home.path().join("auth.json").exists());
+    Ok(())
+}
+
+#[test]
+fn offline_api_bootstrap_is_hidden_from_normal_help() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let help = codex_command(codex_home.path())?
+        .args(["--help"])
+        .output()?;
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("offline-api-bootstrap"));
+
+    codex_command(codex_home.path())?
+        .args(["offline-api-bootstrap", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--api-base-url"));
     Ok(())
 }
 

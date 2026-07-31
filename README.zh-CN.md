@@ -67,6 +67,10 @@ tar -xzf codez-offline-v0.144.4-r8.tar.gz
 不会将密钥写入 `config.toml`。内网服务必须在 `{api-base-url}/responses` 提供 Responses API；
 仅支持 Chat Completions 的网关不能使用。HTTP 地址仍可配置，但安装器会警告 API Key 将以未加密方式传输。
 
+配置成功后，Codez 会将地址写入 `openai_base_url`，选择内置的 `openai` provider；只有传入
+`--model` 时才会写入默认模型。已有的模型推理设置和其他 TOML 配置会保持不变。认证存储方式
+遵循 `cli_auth_credentials_store`，因此 Codez 与 Codex 共用 `CODEX_HOME` 时会使用同一份认证信息。
+
 通过 `--api-key` 传入密钥可能使它出现在 shell 历史和进程列表中。安装器不会回显密钥，
 也不会将密钥放入子 Codez 进程的命令行。由于 Codez 和 Codex 共享 `CODEX_HOME`，
 两者使用同一目录时都会读取这些 API 配置和认证。

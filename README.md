@@ -66,6 +66,12 @@ the API key through Codez's normal API-key login flow rather than in
 HTTP endpoints are accepted with a warning because the API key will be sent
 without transport encryption.
 
+On success, Codez writes the endpoint to `openai_base_url`, selects the built-in
+`openai` provider, and writes `model` only when `--model` is supplied. Existing
+model reasoning settings and unrelated TOML entries remain intact. Credential
+storage follows `cli_auth_credentials_store`, so the same authentication is
+available to Codex when both products share `CODEX_HOME`.
+
 Passing `--api-key` can expose the secret in shell history and process listings.
 The installer does not echo it or forward it in the child Codez command line.
 Because Codez and Codex share `CODEX_HOME`, this configuration is also visible

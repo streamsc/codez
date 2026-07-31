@@ -784,6 +784,33 @@ impl ConfigEditsBuilder {
         self
     }
 
+    /// Set only the configured model name, preserving any existing reasoning effort.
+    pub fn set_model_name(mut self, model: &str) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["model".to_string()],
+            value: value(model.to_string()),
+        });
+        self
+    }
+
+    /// Set the built-in OpenAI provider's base URL.
+    pub fn set_openai_base_url(mut self, base_url: &str) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["openai_base_url".to_string()],
+            value: value(base_url.to_string()),
+        });
+        self
+    }
+
+    /// Select a model provider by its configured provider id.
+    pub fn set_model_provider(mut self, provider: &str) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["model_provider".to_string()],
+            value: value(provider.to_string()),
+        });
+        self
+    }
+
     pub fn set_service_tier(mut self, service_tier: Option<String>) -> Self {
         self.edits.push(ConfigEdit::SetServiceTier { service_tier });
         self

@@ -52,6 +52,7 @@ mod doctor;
 mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
+mod offline_api_bootstrap;
 mod plugin_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
@@ -209,6 +210,10 @@ enum Subcommand {
     /// Internal: relay stdio to a Unix domain socket.
     #[clap(hide = true, name = "stdio-to-uds")]
     StdioToUds(StdioToUdsCommand),
+
+    /// Internal: configure an offline OpenAI-compatible API endpoint.
+    #[clap(hide = true, name = "offline-api-bootstrap")]
+    OfflineApiBootstrap(offline_api_bootstrap::Command),
 
     /// [EXPERIMENTAL] Run the standalone exec-server service.
     ExecServer(ExecServerCommand),
@@ -1581,6 +1586,15 @@ async fn cli_main(
             let socket_path = cmd.socket_path;
             codex_stdio_to_uds::run(socket_path.as_path()).await?;
         }
+        Some(Subcommand::OfflineApiBootstrap(mut cmd)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "offline-api-bootstrap",
+            )?;
+            prepend_config_flags(&mut cmd.config_overrides, root_config_overrides);
+            offline_api_bootstrap::run(cmd).await?;
+        }
         Some(Subcommand::ExecServer(cmd)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2143,6 +2157,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Apply(_)) => Some("apply"),
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
         Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
+        Some(Subcommand::OfflineApiBootstrap(_)) => Some("offline-api-bootstrap"),
         Some(Subcommand::Features(_)) => Some("features"),
     }
 }
