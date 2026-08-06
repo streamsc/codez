@@ -303,6 +303,10 @@ async fn guardian_allows_shell_command_additional_permissions_requests_past_poli
         .expect("test setup should allow enabling request permissions");
     turn_context_raw.permission_profile = codex_protocol::models::PermissionProfile::Disabled;
     let mut config = (*turn_context_raw.config).clone();
+    config
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
+        .expect("test setup should allow disabling the permission profile");
     config.codex_linux_sandbox_exe = codex_linux_sandbox_exe_or_skip!();
     config
         .features
@@ -414,6 +418,10 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_shell_command_policy_
         .expect("test setup should allow updating approval policy");
     turn_context_raw.permission_profile = codex_protocol::models::PermissionProfile::Disabled;
     let mut config = (*turn_context_raw.config).clone();
+    config
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
+        .expect("test setup should allow disabling the permission profile");
     config.approvals_reviewer = ApprovalsReviewer::User;
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     let config = Arc::new(config);
@@ -520,7 +528,7 @@ async fn guardian_allows_unified_exec_additional_permissions_requests_past_polic
 #[tokio::test]
 async fn process_compacted_history_preserves_separate_guardian_developer_message() {
     let (session, mut turn_context) = make_session_and_context().await;
-    let guardian_policy = crate::guardian::guardian_policy_prompt();
+    let guardian_policy = "guardian policy".to_string();
     let guardian_source =
         SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
 
@@ -531,12 +539,15 @@ async fn process_compacted_history_preserves_separate_guardian_developer_message
     turn_context.session_source = guardian_source;
     turn_context.developer_instructions = Some(guardian_policy.clone());
     let turn_context = Arc::new(turn_context);
-    let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
-    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage(world_state);
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let world_state = Arc::new(session.build_world_state_for_step(&step_context).await);
+    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage {
+        world_state,
+        step_context,
+    };
 
     let (refreshed, _) = crate::compact_remote::process_compacted_history(
         &session,
-        &turn_context,
         vec![
             ResponseItem::Message {
                 id: None,
@@ -716,7 +727,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         /*state_db*/ None,
     ));
 
-    let CodexSpawnOk { codex, .. } = Codex::spawn(CodexSpawnArgs {
+    let (session, io) = Session::spawn(SessionSpawnArgs {
         config,
         allow_provider_model_fallback: false,
         user_instructions: Default::default(),
@@ -731,6 +742,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         extensions: codex_extension_api::empty_extension_registry(),
         conversation_history: InitialHistory::New,
         requested_history_mode: None,
+        fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(SubAgentSource::Other(
             GUARDIAN_REVIEWER_NAME.to_string(),
         )),
@@ -754,13 +766,15 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         attestation_provider: None,
         external_time_provider: None,
         inherited_multi_agent_version: None,
+        git_enrichment_policy: GitEnrichmentPolicy::Skip,
+        windows_sandbox_proxy_settings_mode:
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
     })
     .await
     .expect("spawn guardian subagent");
 
     assert_eq!(
-        codex
-            .session
+        session
             .services
             .exec_policy
             .current()
@@ -773,5 +787,5 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
             }],
         }
     );
-    drop(codex);
+    drop(io);
 }

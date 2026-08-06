@@ -1825,6 +1825,7 @@ mod tests {
     use codex_app_server_protocol::JSONRPCMessage;
     use codex_app_server_protocol::JSONRPCNotification;
     use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ServerNotificationEnvelope;
     use codex_config::types::AuthCredentialsStoreMode;
     use codex_core::test_support::auth_manager_from_auth;
     use codex_login::AuthDotJson;
@@ -1835,6 +1836,7 @@ mod tests {
     use codex_login::token_data::parse_chatgpt_jwt_claims;
     use codex_protocol::auth::AuthMode;
     use codex_state::StateRuntime;
+    use codex_utils_absolute_path::test_support::PathExt;
     use futures::StreamExt;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -1993,9 +1995,12 @@ mod tests {
     }
 
     pub(super) async fn remote_control_state_runtime(codex_home: &TempDir) -> Arc<StateRuntime> {
-        StateRuntime::init(codex_home.path().to_path_buf(), "test-provider".to_string())
-            .await
-            .expect("state runtime should initialize")
+        StateRuntime::init(
+            codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state runtime should initialize")
     }
 
     pub(super) fn remote_control_auth_manager() -> Arc<AuthManager> {
@@ -2227,7 +2232,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let mut auth_recovery = auth_manager.unauthorized_recovery();
@@ -2326,7 +2331,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let mut auth_recovery = auth_manager.unauthorized_recovery();
@@ -2454,7 +2459,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let mut auth_recovery = auth_manager.unauthorized_recovery();
@@ -3362,12 +3367,17 @@ mod tests {
         ServerEnvelope {
             event: ServerEvent::ServerMessage {
                 message: Box::new(OutgoingMessage::AppServerNotification(
-                    ServerNotification::ConfigWarning(ConfigWarningNotification {
-                        summary: summary.to_string(),
-                        details: None,
-                        path: None,
-                        range: None,
-                    }),
+                    ServerNotificationEnvelope {
+                        notification: ServerNotification::ConfigWarning(
+                            ConfigWarningNotification {
+                                summary: summary.to_string(),
+                                details: None,
+                                path: None,
+                                range: None,
+                            },
+                        ),
+                        emitted_at_ms: Some(1_234),
+                    },
                 )),
             },
             client_id: client_id.clone(),

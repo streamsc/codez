@@ -1,8 +1,18 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
+use codex_protocol::capabilities::CapabilityRootLocation;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
+use futures::FutureExt;
+
+use crate::CapabilityRootsDiscoverParams;
+use crate::CapabilityRootsDiscoverResponse;
 use crate::ExecServerError;
 use crate::ExecServerRuntimePaths;
 use crate::ExecutorFileSystem;
@@ -10,9 +20,11 @@ use crate::HttpClient;
 use crate::NoiseChannelIdentity;
 use crate::NoiseRendezvousConnectProvider;
 use crate::client::LazyRemoteExecServerClient;
-use crate::client::http_client::ReqwestHttpClient;
+use crate::client::http_client::RouteAwareHttpClient;
 use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
 use crate::client_api::ExecServerTransportParams;
+use crate::environment_bootstrap::PreparedEnvironmentManager;
+use crate::environment_bootstrap::PreparedEnvironmentSource;
 use crate::environment_provider::DefaultEnvironmentProvider;
 use crate::environment_provider::EnvironmentDefault;
 use crate::environment_provider::EnvironmentProvider;
@@ -26,6 +38,8 @@ use crate::protocol::EnvironmentInfo;
 use crate::remote::NoiseRendezvousEnvironmentConfig;
 use crate::remote_file_system::RemoteFileSystem;
 use crate::remote_process::RemoteProcess;
+use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
 pub const CODEX_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_EXEC_SERVER_URL";
@@ -36,6 +50,15 @@ pub const CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR: &str =
 pub const CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR: &str = "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN";
 pub const CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR: &str =
     "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID";
+
+/// The current connection state for one concrete environment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvironmentConnectionState {
+    /// An initialized exec-server connection is available.
+    Connected,
+    /// No initialized exec-server connection is currently available.
+    Disconnected,
+}
 
 /// Owns the execution/filesystem environments available to the Codex runtime.
 ///
@@ -57,10 +80,53 @@ pub struct EnvironmentManager {
     pub(super) environments: RwLock<HashMap<String, Arc<Environment>>>,
     local_environment: Option<Arc<Environment>>,
     local_runtime_paths: Option<ExecServerRuntimePaths>,
+    http_client_factory: HttpClientFactory,
 }
+
+/// Information supplied by the environment owner when a deferred environment is ready.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EnvironmentReadyInfo {
+    /// Ordered capability roots selected for this environment.
+    pub selected_capability_roots: Vec<SelectedCapabilityRoot>,
+}
+
+/// The one-shot capability to complete a deferred environment registration.
+#[must_use = "the deferred environment cannot connect until registration is completed"]
+pub struct DeferredEnvironmentRegistration {
+    completion: oneshot::Sender<Result<(), String>>,
+    environment_id: String,
+    ready_info: Arc<OnceLock<EnvironmentReadyInfo>>,
+}
+
+/// Maximum capability roots accepted from deferred environment ready information.
+pub const MAX_SELECTED_CAPABILITY_ROOTS: usize = 256;
 
 pub const LOCAL_ENVIRONMENT_ID: &str = "local";
 pub const REMOTE_ENVIRONMENT_ID: &str = "remote";
+
+/// Non-mutating connection status observed by an environment owner.
+///
+/// Computing this status never starts, waits for, or reconnects an exec-server
+/// transport. Already-ready remote environments may receive a fail-fast probe
+/// over their existing connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentObservedStatus {
+    /// A local environment, or a remote environment whose existing connection answered a probe.
+    Ready,
+    /// The configured environment has no ready connection and no observed connection failure.
+    ///
+    /// This includes lazy transports that have never been started and initial startup that has
+    /// not finished. Computing status does not start the environment or wait for startup.
+    Pending,
+    /// A connection attempt, prior connection, or fail-fast status probe observed a failure.
+    ///
+    /// This does not promise that the failure is terminal: later normal environment use may
+    /// recover the connection. Computing status itself does not trigger recovery.
+    Disconnected {
+        /// Human-readable reason recorded by the failed connection attempt or probe.
+        error: String,
+    },
+}
 
 impl EnvironmentManager {
     /// Builds a test-only manager without configured sandbox helper paths.
@@ -73,16 +139,19 @@ impl EnvironmentManager {
             )])),
             local_environment: Some(Arc::new(Environment::default_for_tests())),
             local_runtime_paths: None,
+            // Test-only construction has no application config from which to resolve proxy policy.
+            http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         }
     }
 
     /// Builds a manager with no configured execution environments.
-    pub fn without_environments() -> Self {
+    pub fn without_environments(http_client_factory: HttpClientFactory) -> Self {
         Self {
             default_environment: None,
             environments: RwLock::new(HashMap::new()),
             local_environment: None,
             local_runtime_paths: None,
+            http_client_factory,
         }
     }
 
@@ -91,63 +160,81 @@ impl EnvironmentManager {
         exec_server_url: Option<String>,
         local_runtime_paths: Option<ExecServerRuntimePaths>,
     ) -> Self {
-        Self::from_default_provider_url(exec_server_url, local_runtime_paths).await
-    }
-
-    /// Builds a manager from `CODEX_HOME` and local runtime paths used when
-    /// creating local filesystem helpers.
-    ///
-    /// If `CODEX_HOME/environments.toml` is present, it defines the configured
-    /// environments. Otherwise this preserves the legacy
-    /// `CODEX_EXEC_SERVER_URL` behavior.
-    pub async fn from_codex_home(
-        codex_home: impl AsRef<std::path::Path>,
-        local_runtime_paths: Option<ExecServerRuntimePaths>,
-    ) -> Result<Self, ExecServerError> {
-        if let Some(config) = noise_environment_config_from_env()? {
-            return Self::from_noise_environment_config(config, local_runtime_paths);
-        }
-        let provider = environment_provider_from_codex_home(codex_home.as_ref())?;
-        Self::from_snapshot(provider.snapshot().await?, local_runtime_paths)
-    }
-
-    /// Builds a manager from the legacy environment-variable provider without
-    /// reading user config files from `CODEX_HOME`.
-    pub async fn from_env(
-        local_runtime_paths: Option<ExecServerRuntimePaths>,
-    ) -> Result<Self, ExecServerError> {
-        if let Some(config) = noise_environment_config_from_env()? {
-            return Self::from_noise_environment_config(config, local_runtime_paths);
-        }
-        let provider = DefaultEnvironmentProvider::from_env();
-        Self::from_snapshot(provider.snapshot().await?, local_runtime_paths)
-    }
-
-    async fn from_default_provider_url(
-        exec_server_url: Option<String>,
-        local_runtime_paths: Option<ExecServerRuntimePaths>,
-    ) -> Self {
         let provider = DefaultEnvironmentProvider::new(exec_server_url);
-        match Self::from_snapshot(provider.snapshot_inner(), local_runtime_paths) {
+        match Self::from_snapshot(
+            provider.snapshot_inner(),
+            local_runtime_paths,
+            // Test-only construction has no application config from which to resolve proxy policy.
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        ) {
             Ok(manager) => manager,
             Err(err) => panic!("default provider should create valid environments: {err}"),
         }
     }
 
-    fn from_noise_environment_config(
+    /// Discovers configured environments without starting remote connections.
+    ///
+    /// If `CODEX_HOME/environments.toml` is present, it defines the configured
+    /// environments. Otherwise this preserves the legacy
+    /// `CODEX_EXEC_SERVER_URL` behavior.
+    pub async fn prepare_from_codex_home(
+        codex_home: impl AsRef<std::path::Path>,
+    ) -> Result<PreparedEnvironmentManager, ExecServerError> {
+        let source = if let Some(config) = noise_environment_config_from_env()? {
+            PreparedEnvironmentSource::Noise(config)
+        } else {
+            let provider = environment_provider_from_codex_home(codex_home.as_ref())?;
+            PreparedEnvironmentSource::Snapshot(provider.snapshot().await?)
+        };
+        Ok(PreparedEnvironmentManager { source })
+    }
+
+    /// Builds a manager from `CODEX_HOME` with an explicit outbound HTTP policy.
+    pub async fn from_codex_home(
+        codex_home: impl AsRef<std::path::Path>,
+        local_runtime_paths: Option<ExecServerRuntimePaths>,
+        http_client_factory: HttpClientFactory,
+    ) -> Result<Self, ExecServerError> {
+        Self::prepare_from_codex_home(codex_home)
+            .await?
+            .build(local_runtime_paths, http_client_factory)
+    }
+
+    /// Discovers environment-variable environments without starting connections.
+    pub async fn prepare_from_env() -> Result<PreparedEnvironmentManager, ExecServerError> {
+        let source = if let Some(config) = noise_environment_config_from_env()? {
+            PreparedEnvironmentSource::Noise(config)
+        } else {
+            let provider = DefaultEnvironmentProvider::from_env();
+            PreparedEnvironmentSource::Snapshot(provider.snapshot().await?)
+        };
+        Ok(PreparedEnvironmentManager { source })
+    }
+
+    /// Builds a manager from environment variables with an explicit outbound HTTP policy.
+    pub async fn from_env(
+        local_runtime_paths: Option<ExecServerRuntimePaths>,
+        http_client_factory: HttpClientFactory,
+    ) -> Result<Self, ExecServerError> {
+        Self::prepare_from_env()
+            .await?
+            .build(local_runtime_paths, http_client_factory)
+    }
+
+    pub(crate) fn from_noise_environment_config(
         config: NoiseRendezvousEnvironmentConfig,
         local_runtime_paths: Option<ExecServerRuntimePaths>,
+        http_client_factory: HttpClientFactory,
     ) -> Result<Self, ExecServerError> {
+        let connect_provider = config.into_connect_provider(http_client_factory.clone())?;
         let manager = Self {
             default_environment: Some(REMOTE_ENVIRONMENT_ID.to_string()),
             environments: RwLock::new(HashMap::new()),
             local_environment: None,
             local_runtime_paths,
+            http_client_factory,
         };
-        manager.upsert_noise_environment(
-            REMOTE_ENVIRONMENT_ID.to_string(),
-            config.connect_provider(),
-        )?;
+        manager.upsert_noise_environment(REMOTE_ENVIRONMENT_ID.to_string(), connect_provider)?;
         Ok(manager)
     }
 
@@ -159,15 +246,21 @@ impl EnvironmentManager {
     ) -> Self {
         let mut snapshot = DefaultEnvironmentProvider::new(exec_server_url).snapshot_inner();
         snapshot.include_local = true;
-        match Self::from_snapshot(snapshot, Some(local_runtime_paths)) {
+        match Self::from_snapshot(
+            snapshot,
+            Some(local_runtime_paths),
+            // Test-only construction has no application config from which to resolve proxy policy.
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        ) {
             Ok(manager) => manager,
             Err(err) => panic!("test provider with local should create valid environments: {err}"),
         }
     }
 
-    fn from_snapshot(
+    pub(crate) fn from_snapshot(
         snapshot: EnvironmentProviderSnapshot,
         local_runtime_paths: Option<ExecServerRuntimePaths>,
+        http_client_factory: HttpClientFactory,
     ) -> Result<Self, ExecServerError> {
         let EnvironmentProviderSnapshot {
             environments,
@@ -182,7 +275,10 @@ impl EnvironmentManager {
                     "local environment requires configured runtime paths".to_string(),
                 )
             })?;
-            let local_environment = Arc::new(Environment::local(local_runtime_paths));
+            let local_environment = Arc::new(Environment::local(
+                local_runtime_paths,
+                http_client_factory.clone(),
+            ));
             environment_map.insert(
                 LOCAL_ENVIRONMENT_ID.to_string(),
                 Arc::clone(&local_environment),
@@ -191,7 +287,7 @@ impl EnvironmentManager {
         } else {
             None
         };
-        for (id, environment) in environments {
+        for (id, transport) in environments {
             if id.is_empty() {
                 return Err(ExecServerError::Protocol(
                     "environment id cannot be empty".to_string(),
@@ -202,6 +298,11 @@ impl EnvironmentManager {
                     "environment id `{LOCAL_ENVIRONMENT_ID}` is reserved for EnvironmentManager"
                 )));
             }
+            let environment = Environment::remote_with_transport(
+                transport,
+                /*local_runtime_paths*/ None,
+                http_client_factory.clone(),
+            );
             if environment_map
                 .insert(id.clone(), Arc::new(environment))
                 .is_some()
@@ -231,6 +332,7 @@ impl EnvironmentManager {
             environments: RwLock::new(environment_map),
             local_environment,
             local_runtime_paths,
+            http_client_factory,
         })
     }
 
@@ -271,12 +373,6 @@ impl EnvironmentManager {
         self.local_environment.as_ref().map(Arc::clone)
     }
 
-    /// Returns the default environment or local environment when either exists.
-    pub fn default_or_local_environment(&self) -> Option<Arc<Environment>> {
-        self.default_environment()
-            .or_else(|| self.try_local_environment())
-    }
-
     /// Returns a named environment instance.
     pub fn get_environment(&self, environment_id: &str) -> Option<Arc<Environment>> {
         self.environments
@@ -284,6 +380,20 @@ impl EnvironmentManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(environment_id)
             .cloned()
+    }
+
+    /// Returns the outbound HTTP policy carried by this manager.
+    pub fn http_client_factory(&self) -> &HttpClientFactory {
+        &self.http_client_factory
+    }
+
+    /// Returns the current status of one named environment when it is configured.
+    pub async fn get_environment_status(
+        &self,
+        environment_id: &str,
+    ) -> Option<EnvironmentObservedStatus> {
+        let environment = self.get_environment(environment_id)?;
+        Some(environment.status().await)
     }
 
     /// Adds or replaces a named remote environment without changing the
@@ -295,35 +405,46 @@ impl EnvironmentManager {
         exec_server_url: String,
         connect_timeout: Option<std::time::Duration>,
     ) -> Result<(), ExecServerError> {
-        if environment_id.is_empty() {
-            return Err(ExecServerError::Protocol(
-                "environment id cannot be empty".to_string(),
-            ));
-        }
-        let (exec_server_url, disabled) = normalize_exec_server_url(Some(exec_server_url));
-        if disabled {
-            return Err(ExecServerError::Protocol(
-                "remote environment cannot use disabled exec-server url".to_string(),
-            ));
-        }
-        let Some(exec_server_url) = exec_server_url else {
-            return Err(ExecServerError::Protocol(
-                "remote environment requires an exec-server url".to_string(),
-            ));
-        };
+        validate_environment_id(&environment_id)?;
+        let exec_server_url = validate_remote_exec_server_url(exec_server_url)?;
         let environment = Arc::new(Environment::remote_with_transport(
             ExecServerTransportParams::websocket_url(
                 exec_server_url,
                 connect_timeout.unwrap_or(DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT),
             ),
             self.local_runtime_paths.clone(),
+            self.http_client_factory.clone(),
         ));
-        environment.start_connecting();
-        self.environments
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(environment_id, environment);
+        self.insert_environment(environment_id, environment);
         Ok(())
+    }
+
+    /// Adds or replaces a Noise rendezvous environment that will become ready later.
+    pub fn register_deferred_noise_environment(
+        &self,
+        environment_id: String,
+        provider: Arc<dyn NoiseRendezvousConnectProvider>,
+    ) -> Result<DeferredEnvironmentRegistration, ExecServerError> {
+        validate_environment_id(&environment_id)?;
+        let identity = noise_channel_identity()?;
+        let (completion, readiness) = oneshot::channel();
+        let ready_info = Arc::new(OnceLock::new());
+        let mut environment = Environment::remote_with_transport(
+            ExecServerTransportParams::Deferred(Box::new(crate::client_api::Deferred {
+                readiness: readiness.shared(),
+                transport: ExecServerTransportParams::NoiseRendezvous { provider, identity },
+            })),
+            self.local_runtime_paths.clone(),
+            self.http_client_factory.clone(),
+        );
+        environment.ready_info = Some(Arc::clone(&ready_info));
+        let environment = Arc::new(environment);
+        self.insert_environment(environment_id.clone(), environment);
+        Ok(DeferredEnvironmentRegistration {
+            completion,
+            environment_id,
+            ready_info,
+        })
     }
 
     /// Adds or replaces a named remote environment that connects through an
@@ -336,27 +457,106 @@ impl EnvironmentManager {
         environment_id: String,
         provider: Arc<dyn NoiseRendezvousConnectProvider>,
     ) -> Result<(), ExecServerError> {
-        if environment_id.is_empty() {
-            return Err(ExecServerError::Protocol(
-                "environment id cannot be empty".to_string(),
-            ));
-        }
-        let identity = NoiseChannelIdentity::generate().map_err(|error| {
-            ExecServerError::Protocol(format!(
-                "failed to generate Noise harness identity: {error}"
-            ))
-        })?;
+        validate_environment_id(&environment_id)?;
+        let identity = noise_channel_identity()?;
         let environment = Arc::new(Environment::remote_with_transport(
             ExecServerTransportParams::NoiseRendezvous { provider, identity },
             self.local_runtime_paths.clone(),
+            self.http_client_factory.clone(),
         ));
-        environment.start_connecting();
+        self.insert_environment(environment_id, environment);
+        Ok(())
+    }
+
+    fn insert_environment(&self, environment_id: String, environment: Arc<Environment>) {
         self.environments
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(environment_id, environment);
-        Ok(())
+            .insert(environment_id, Arc::clone(&environment));
+        environment.start_connecting();
     }
+}
+
+impl DeferredEnvironmentRegistration {
+    /// Completes provisioning with ready information or a terminal error message.
+    pub fn complete(
+        self,
+        result: Result<EnvironmentReadyInfo, String>,
+    ) -> Result<(), ExecServerError> {
+        let result = match result {
+            Ok(ready_info) => {
+                if ready_info.selected_capability_roots.len() > MAX_SELECTED_CAPABILITY_ROOTS {
+                    let error = ExecServerError::Protocol(format!(
+                        "environment ready info contains more than {MAX_SELECTED_CAPABILITY_ROOTS} selected capability roots"
+                    ));
+                    let _ = self.completion.send(Err(error.to_string()));
+                    return Err(error);
+                }
+                let mut root_ids =
+                    HashSet::with_capacity(ready_info.selected_capability_roots.len());
+                for root in &ready_info.selected_capability_roots {
+                    let CapabilityRootLocation::Environment { environment_id, .. } = &root.location;
+                    if root.id.trim().is_empty()
+                        || environment_id != &self.environment_id
+                        || !root_ids.insert(root.id.as_str())
+                    {
+                        let error = ExecServerError::Protocol(format!(
+                            "selected capability roots must have unique non-empty IDs and belong to environment `{}`",
+                            self.environment_id
+                        ));
+                        let _ = self.completion.send(Err(error.to_string()));
+                        return Err(error);
+                    }
+                }
+                if self.ready_info.set(ready_info).is_err() {
+                    let error = ExecServerError::Protocol(
+                        "deferred environment ready info was already set".to_string(),
+                    );
+                    let _ = self.completion.send(Err(error.to_string()));
+                    return Err(error);
+                }
+                Ok(())
+            }
+            Err(message) => Err(message),
+        };
+        self.completion.send(result).map_err(|_| {
+            ExecServerError::Disconnected("deferred environment registration is inactive".into())
+        })
+    }
+}
+
+fn noise_channel_identity() -> Result<NoiseChannelIdentity, ExecServerError> {
+    NoiseChannelIdentity::generate().map_err(|error| {
+        ExecServerError::Protocol(format!(
+            "failed to generate Noise harness identity: {error}"
+        ))
+    })
+}
+
+fn validate_environment_id(environment_id: &str) -> Result<(), ExecServerError> {
+    if environment_id.is_empty() {
+        return Err(ExecServerError::Protocol(
+            "environment id cannot be empty".to_string(),
+        ));
+    }
+    if environment_id == LOCAL_ENVIRONMENT_ID {
+        return Err(ExecServerError::Protocol(format!(
+            "environment id `{LOCAL_ENVIRONMENT_ID}` is reserved for EnvironmentManager"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_remote_exec_server_url(exec_server_url: String) -> Result<String, ExecServerError> {
+    let (exec_server_url, disabled) = normalize_exec_server_url(Some(exec_server_url));
+    if disabled {
+        return Err(ExecServerError::Protocol(
+            "remote environment cannot use disabled exec-server url".to_string(),
+        ));
+    }
+    exec_server_url.ok_or_else(|| {
+        ExecServerError::Protocol("remote environment requires an exec-server url".to_string())
+    })
 }
 
 fn noise_environment_config_from_env()
@@ -390,13 +590,13 @@ fn noise_environment_config_from_values(
             }
         };
 
-    let config = NoiseRendezvousEnvironmentConfig::new(
+    NoiseRendezvousEnvironmentConfig::new(
         registry_url,
         environment_id,
         auth_token,
         chatgpt_account_id,
-    )?;
-    Ok(Some(config))
+    )
+    .map(Some)
 }
 
 fn optional_environment_value(name: &str) -> Option<String> {
@@ -412,8 +612,8 @@ fn optional_environment_value(name: &str) -> Option<String> {
 /// paths used by filesystem helpers.
 #[derive(Clone)]
 pub struct Environment {
-    exec_server_url: Option<String>,
     remote_client: Option<LazyRemoteExecServerClient>,
+    ready_info: Option<Arc<OnceLock<EnvironmentReadyInfo>>>,
     // Dropping the environment stops unfinished background startup work.
     startup_task: Arc<Mutex<Option<AbortOnDropHandle<()>>>>,
     exec_backend: Arc<dyn ExecBackend>,
@@ -426,12 +626,15 @@ impl Environment {
     /// Builds a test-only local environment without configured sandbox helper paths.
     pub fn default_for_tests() -> Self {
         Self {
-            exec_server_url: None,
             remote_client: None,
+            ready_info: None,
             startup_task: Arc::new(Mutex::new(None)),
             exec_backend: Arc::new(LocalProcess::default()),
             filesystem: Arc::new(LocalFileSystem::unsandboxed()),
-            http_client: Arc::new(ReqwestHttpClient),
+            // Test-only construction has no application config from which to resolve proxy policy.
+            http_client: Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
+                OutboundProxyPolicy::ReqwestDefault,
+            ))),
             local_runtime_paths: None,
         }
     }
@@ -439,24 +642,31 @@ impl Environment {
 
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Environment")
-            .field("exec_server_url", &self.exec_server_url)
-            .finish_non_exhaustive()
+        f.debug_struct("Environment").finish_non_exhaustive()
     }
 }
 
 impl Environment {
-    /// Builds an environment from the raw `CODEX_EXEC_SERVER_URL` value.
+    /// Builds an environment using the caller's effective outbound HTTP policy.
     pub fn create(
         exec_server_url: Option<String>,
         local_runtime_paths: ExecServerRuntimePaths,
+        http_client_factory: HttpClientFactory,
     ) -> Result<Self, ExecServerError> {
-        Self::create_inner(exec_server_url, Some(local_runtime_paths))
+        Self::create_inner(
+            exec_server_url,
+            Some(local_runtime_paths),
+            http_client_factory,
+        )
     }
 
     /// Builds a test-only environment without configured sandbox helper paths.
     pub fn create_for_tests(exec_server_url: Option<String>) -> Result<Self, ExecServerError> {
-        Self::create_inner(exec_server_url, /*local_runtime_paths*/ None)
+        Self::create_inner(
+            exec_server_url,
+            /*local_runtime_paths*/ None,
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
     }
 
     /// Builds an environment from the raw `CODEX_EXEC_SERVER_URL` value and
@@ -464,6 +674,7 @@ impl Environment {
     fn create_inner(
         exec_server_url: Option<String>,
         local_runtime_paths: Option<ExecServerRuntimePaths>,
+        http_client_factory: HttpClientFactory,
     ) -> Result<Self, ExecServerError> {
         let (exec_server_url, disabled) = normalize_exec_server_url(exec_server_url);
         if disabled {
@@ -473,18 +684,28 @@ impl Environment {
         }
 
         Ok(match exec_server_url {
-            Some(exec_server_url) => Self::remote_inner(exec_server_url, local_runtime_paths),
+            Some(exec_server_url) => Self::remote_with_transport(
+                ExecServerTransportParams::websocket_url(
+                    exec_server_url,
+                    DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+                ),
+                local_runtime_paths,
+                http_client_factory,
+            ),
             None => match local_runtime_paths {
-                Some(local_runtime_paths) => Self::local(local_runtime_paths),
+                Some(local_runtime_paths) => Self::local(local_runtime_paths, http_client_factory),
                 None => Self::default_for_tests(),
             },
         })
     }
 
-    pub(crate) fn local(local_runtime_paths: ExecServerRuntimePaths) -> Self {
+    pub(crate) fn local(
+        local_runtime_paths: ExecServerRuntimePaths,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
         Self {
-            exec_server_url: None,
             remote_client: None,
+            ready_info: None,
             startup_task: Arc::new(Mutex::new(None)),
             exec_backend: Arc::new(LocalProcess::with_local_runtime_paths(
                 local_runtime_paths.clone(),
@@ -492,44 +713,24 @@ impl Environment {
             filesystem: Arc::new(LocalFileSystem::with_runtime_paths(
                 local_runtime_paths.clone(),
             )),
-            http_client: Arc::new(ReqwestHttpClient),
+            http_client: Arc::new(RouteAwareHttpClient::new(http_client_factory)),
             local_runtime_paths: Some(local_runtime_paths),
         }
-    }
-
-    pub(crate) fn remote_inner(
-        exec_server_url: String,
-        local_runtime_paths: Option<ExecServerRuntimePaths>,
-    ) -> Self {
-        Self::remote_with_transport(
-            ExecServerTransportParams::websocket_url(
-                exec_server_url,
-                DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
-            ),
-            local_runtime_paths,
-        )
     }
 
     pub(crate) fn remote_with_transport(
         remote_transport: ExecServerTransportParams,
         local_runtime_paths: Option<ExecServerRuntimePaths>,
+        http_client_factory: HttpClientFactory,
     ) -> Self {
-        let exec_server_url = match &remote_transport {
-            ExecServerTransportParams::WebSocketUrl {
-                websocket_url: exec_server_url,
-                ..
-            } => Some(exec_server_url.clone()),
-            ExecServerTransportParams::NoiseRendezvous { .. } => None,
-            ExecServerTransportParams::StdioCommand { .. } => None,
-        };
-        let client = LazyRemoteExecServerClient::new(remote_transport);
+        let client = LazyRemoteExecServerClient::new(remote_transport, http_client_factory);
         let exec_backend: Arc<dyn ExecBackend> = Arc::new(RemoteProcess::new(client.clone()));
         let filesystem: Arc<dyn ExecutorFileSystem> =
             Arc::new(RemoteFileSystem::new(client.clone()));
 
         Self {
-            exec_server_url,
             remote_client: Some(client.clone()),
+            ready_info: None,
             startup_task: Arc::new(Mutex::new(None)),
             exec_backend,
             filesystem,
@@ -542,9 +743,23 @@ impl Environment {
         self.remote_client.is_some()
     }
 
-    /// Returns the remote exec-server URL when this environment is remote.
-    pub fn exec_server_url(&self) -> Option<&str> {
-        self.exec_server_url.as_deref()
+    /// Returns capability roots supplied with the deferred environment's ready signal.
+    pub fn selected_capability_roots(&self) -> &[SelectedCapabilityRoot] {
+        self.ready_info
+            .as_ref()
+            .and_then(|ready_info| ready_info.get())
+            .map_or(&[], |ready_info| {
+                ready_info.selected_capability_roots.as_slice()
+            })
+    }
+
+    /// Subscribes to the current connection state for this remote environment.
+    pub fn subscribe_connection_state(
+        &self,
+    ) -> Option<watch::Receiver<EnvironmentConnectionState>> {
+        self.remote_client
+            .as_ref()
+            .map(LazyRemoteExecServerClient::subscribe_connection_state)
     }
 
     pub fn local_runtime_paths(&self) -> Option<&ExecServerRuntimePaths> {
@@ -556,6 +771,19 @@ impl Environment {
         match &self.remote_client {
             Some(client) => client.environment_info().await,
             None => Ok(EnvironmentInfo::local()),
+        }
+    }
+
+    /// Discovers plugin and skill manifests through the environment's high-level discovery API.
+    pub async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+    ) -> Result<CapabilityRootsDiscoverResponse, ExecServerError> {
+        match &self.remote_client {
+            Some(client) => client.get().await?.discover_capability_roots(params).await,
+            None => crate::discover_capability_roots(self.filesystem.as_ref(), params)
+                .await
+                .map_err(|error| ExecServerError::Protocol(error.to_string())),
         }
     }
 
@@ -608,6 +836,27 @@ impl Environment {
         }
     }
 
+    /// Returns whether the environment can serve a request without waiting or reconnecting.
+    pub(crate) fn readiness_result(&self) -> Option<Result<(), ExecServerError>> {
+        match &self.remote_client {
+            Some(client) => client.readiness_result(),
+            None => Some(Ok(())),
+        }
+    }
+
+    /// Returns the environment's status without starting or recovering it.
+    ///
+    /// Local environments are always ready. Remote environments with an
+    /// already-ready cached connection receive a fail-fast `environment/status`
+    /// probe; other remote states are returned from cached connection state
+    /// without waiting for startup or recovery.
+    pub async fn status(&self) -> EnvironmentObservedStatus {
+        match &self.remote_client {
+            Some(client) => client.status().await,
+            None => EnvironmentObservedStatus::Ready,
+        }
+    }
+
     pub fn get_exec_backend(&self) -> Arc<dyn ExecBackend> {
         Arc::clone(&self.exec_backend)
     }
@@ -619,6 +868,14 @@ impl Environment {
     pub fn get_filesystem(&self) -> Arc<dyn ExecutorFileSystem> {
         Arc::clone(&self.filesystem)
     }
+
+    /// Returns a filesystem view that fails instead of starting or waiting for a connection.
+    pub fn get_filesystem_without_reconnect(&self) -> Arc<dyn ExecutorFileSystem> {
+        match &self.remote_client {
+            Some(client) => Arc::new(RemoteFileSystem::new(client.fail_fast())),
+            None => Arc::clone(&self.filesystem),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -629,19 +886,34 @@ mod tests {
 
     use super::Environment;
     use super::EnvironmentManager;
+    use super::EnvironmentObservedStatus;
     use super::LOCAL_ENVIRONMENT_ID;
     use super::REMOTE_ENVIRONMENT_ID;
     use super::noise_environment_config_from_values;
     use crate::ExecServerRuntimePaths;
     use crate::ProcessId;
+    use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT;
     use crate::client_api::ExecServerTransportParams;
     use crate::client_api::StdioExecServerCommand;
     use crate::environment_provider::EnvironmentDefault;
     use crate::environment_provider::EnvironmentProviderSnapshot;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
     use tokio::net::TcpListener;
     use tokio::time::timeout;
+
+    fn legacy_http_client_factory() -> HttpClientFactory {
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+    }
+
+    fn prepared_websocket_environment() -> ExecServerTransportParams {
+        ExecServerTransportParams::websocket_url(
+            "ws://127.0.0.1:8765".to_string(),
+            DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+        )
+    }
 
     fn test_runtime_paths() -> ExecServerRuntimePaths {
         ExecServerRuntimePaths::new(
@@ -680,10 +952,16 @@ mod tests {
         .expect("noise environment configuration");
 
         let manager = EnvironmentManager::from_noise_environment_config(
-            config, /*local_runtime_paths*/ None,
+            config,
+            /*local_runtime_paths*/ None,
+            HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
         )
         .expect("build environment manager");
 
+        assert_eq!(
+            manager.http_client_factory().outbound_proxy_policy(),
+            OutboundProxyPolicy::RespectSystemProxy
+        );
         assert_eq!(
             manager.default_environment_id(),
             Some(REMOTE_ENVIRONMENT_ID)
@@ -699,10 +977,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_local_environment_does_not_connect() {
-        let environment = Environment::create(/*exec_server_url*/ None, test_runtime_paths())
-            .expect("create environment");
+        let environment = Environment::create(
+            /*exec_server_url*/ None,
+            test_runtime_paths(),
+            legacy_http_client_factory(),
+        )
+        .expect("create environment");
 
-        assert_eq!(environment.exec_server_url(), None);
         assert!(!environment.is_remote());
         assert!(environment.info().await.is_ok());
     }
@@ -732,17 +1013,23 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_environment_manager_has_no_default_or_local_environment() {
-        let manager = EnvironmentManager::without_environments();
+        let manager = EnvironmentManager::without_environments(HttpClientFactory::new(
+            OutboundProxyPolicy::RespectSystemProxy,
+        ));
 
         assert!(manager.default_environment().is_none());
         assert_eq!(manager.default_environment_id(), None);
         assert_local_environment_unavailable(&manager);
         assert!(manager.get_environment(LOCAL_ENVIRONMENT_ID).is_none());
         assert!(manager.get_environment(REMOTE_ENVIRONMENT_ID).is_none());
+        assert_eq!(
+            manager.http_client_factory().outbound_proxy_policy(),
+            OutboundProxyPolicy::RespectSystemProxy
+        );
     }
 
     #[tokio::test]
-    async fn environment_manager_reports_remote_url() {
+    async fn environment_manager_creates_remote_environment_for_url() {
         let manager = EnvironmentManager::create_for_tests(
             Some("ws://127.0.0.1:8765".to_string()),
             Some(test_runtime_paths()),
@@ -755,7 +1042,6 @@ mod tests {
             Some(REMOTE_ENVIRONMENT_ID)
         );
         assert!(environment.is_remote());
-        assert_eq!(environment.exec_server_url(), Some("ws://127.0.0.1:8765"));
         assert!(Arc::ptr_eq(
             &environment,
             &manager
@@ -785,14 +1071,17 @@ mod tests {
         let snapshot = EnvironmentProviderSnapshot {
             environments: vec![(
                 REMOTE_ENVIRONMENT_ID.to_string(),
-                Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
-                    .expect("remote environment"),
+                prepared_websocket_environment(),
             )],
             default: EnvironmentDefault::EnvironmentId(REMOTE_ENVIRONMENT_ID.to_string()),
             include_local: false,
         };
-        let manager = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
-            .expect("environment manager");
+        let manager = EnvironmentManager::from_snapshot(
+            snapshot,
+            Some(test_runtime_paths()),
+            legacy_http_client_factory(),
+        )
+        .expect("environment manager");
 
         assert_eq!(
             manager.default_environment_id(),
@@ -811,12 +1100,16 @@ mod tests {
     #[tokio::test]
     async fn environment_manager_rejects_empty_environment_id() {
         let snapshot = EnvironmentProviderSnapshot {
-            environments: vec![("".to_string(), Environment::default_for_tests())],
+            environments: vec![("".to_string(), prepared_websocket_environment())],
             default: EnvironmentDefault::Disabled,
             include_local: false,
         };
-        let err = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
-            .expect_err("empty id should fail");
+        let err = EnvironmentManager::from_snapshot(
+            snapshot,
+            Some(test_runtime_paths()),
+            legacy_http_client_factory(),
+        )
+        .expect_err("empty id should fail");
 
         assert_eq!(
             err.to_string(),
@@ -829,13 +1122,17 @@ mod tests {
         let snapshot = EnvironmentProviderSnapshot {
             environments: vec![(
                 LOCAL_ENVIRONMENT_ID.to_string(),
-                Environment::default_for_tests(),
+                prepared_websocket_environment(),
             )],
             default: EnvironmentDefault::Disabled,
             include_local: false,
         };
-        let err = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
-            .expect_err("local id should fail");
+        let err = EnvironmentManager::from_snapshot(
+            snapshot,
+            Some(test_runtime_paths()),
+            legacy_http_client_factory(),
+        )
+        .expect_err("local id should fail");
 
         assert_eq!(
             err.to_string(),
@@ -846,16 +1143,16 @@ mod tests {
     #[tokio::test]
     async fn environment_manager_uses_explicit_provider_default() {
         let snapshot = EnvironmentProviderSnapshot {
-            environments: vec![(
-                "devbox".to_string(),
-                Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
-                    .expect("remote environment"),
-            )],
+            environments: vec![("devbox".to_string(), prepared_websocket_environment())],
             default: EnvironmentDefault::EnvironmentId("devbox".to_string()),
             include_local: true,
         };
-        let manager = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
-            .expect("manager");
+        let manager = EnvironmentManager::from_snapshot(
+            snapshot,
+            Some(test_runtime_paths()),
+            legacy_http_client_factory(),
+        )
+        .expect("manager");
 
         assert_eq!(manager.default_environment_id(), Some("devbox"));
         assert_eq!(
@@ -868,16 +1165,16 @@ mod tests {
     #[tokio::test]
     async fn environment_manager_disables_provider_default() {
         let snapshot = EnvironmentProviderSnapshot {
-            environments: vec![(
-                "devbox".to_string(),
-                Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
-                    .expect("remote environment"),
-            )],
+            environments: vec![("devbox".to_string(), prepared_websocket_environment())],
             default: EnvironmentDefault::Disabled,
             include_local: true,
         };
-        let manager = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
-            .expect("manager");
+        let manager = EnvironmentManager::from_snapshot(
+            snapshot,
+            Some(test_runtime_paths()),
+            legacy_http_client_factory(),
+        )
+        .expect("manager");
 
         assert_eq!(manager.default_environment_id(), None);
         assert!(manager.default_environment().is_none());
@@ -892,16 +1189,16 @@ mod tests {
     #[tokio::test]
     async fn environment_manager_rejects_unknown_provider_default() {
         let snapshot = EnvironmentProviderSnapshot {
-            environments: vec![(
-                "devbox".to_string(),
-                Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
-                    .expect("remote environment"),
-            )],
+            environments: vec![("devbox".to_string(), prepared_websocket_environment())],
             default: EnvironmentDefault::EnvironmentId("missing".to_string()),
             include_local: true,
         };
-        let err = EnvironmentManager::from_snapshot(snapshot, Some(test_runtime_paths()))
-            .expect_err("unknown default should fail");
+        let err = EnvironmentManager::from_snapshot(
+            snapshot,
+            Some(test_runtime_paths()),
+            legacy_http_client_factory(),
+        )
+        .expect_err("unknown default should fail");
 
         assert_eq!(
             err.to_string(),
@@ -945,7 +1242,7 @@ mod tests {
 
         assert_eq!(environment.local_runtime_paths(), Some(&runtime_paths));
         let manager = EnvironmentManager::create_for_tests(
-            environment.exec_server_url().map(str::to_owned),
+            /*exec_server_url*/ None,
             Some(
                 environment
                     .local_runtime_paths()
@@ -982,9 +1279,12 @@ mod tests {
         };
         snapshot.include_local = false;
         snapshot.default = EnvironmentDefault::Disabled;
-        let manager =
-            EnvironmentManager::from_snapshot(snapshot, /*local_runtime_paths*/ None)
-                .expect("environment manager");
+        let manager = EnvironmentManager::from_snapshot(
+            snapshot,
+            /*local_runtime_paths*/ None,
+            legacy_http_client_factory(),
+        )
+        .expect("environment manager");
 
         assert!(manager.default_environment().is_none());
         assert_eq!(manager.default_environment_id(), None);
@@ -1001,7 +1301,7 @@ mod tests {
 
     #[tokio::test]
     async fn environment_manager_upserts_named_remote_environment() {
-        let manager = EnvironmentManager::without_environments();
+        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
 
         manager
             .upsert_environment(
@@ -1014,7 +1314,6 @@ mod tests {
             .get_environment("executor-a")
             .expect("first remote environment");
         assert!(first.is_remote());
-        assert_eq!(first.exec_server_url(), Some("ws://127.0.0.1:8765"));
         assert_eq!(manager.default_environment_id(), None);
 
         manager
@@ -1028,7 +1327,6 @@ mod tests {
             .get_environment("executor-a")
             .expect("second remote environment");
         assert!(second.is_remote());
-        assert_eq!(second.exec_server_url(), Some("ws://127.0.0.1:9876"));
         assert!(!Arc::ptr_eq(&first, &second));
     }
 
@@ -1037,7 +1335,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind websocket listener");
-        let manager = EnvironmentManager::without_environments();
+        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
 
         manager
             .upsert_environment(
@@ -1054,7 +1352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn environment_manager_leaves_stdio_environment_lazy() {
+    async fn environment_status_keeps_stdio_environment_pending() {
         let environment = Environment::remote_with_transport(
             ExecServerTransportParams::StdioCommand {
                 command: StdioExecServerCommand {
@@ -1066,14 +1364,35 @@ mod tests {
                 initialize_timeout: Duration::from_secs(1),
             },
             /*local_runtime_paths*/ None,
+            legacy_http_client_factory(),
         );
+
+        assert_eq!(
+            environment.status().await,
+            EnvironmentObservedStatus::Pending
+        );
+        assert!(!environment.startup_finished());
+    }
+
+    #[tokio::test]
+    async fn environment_manager_leaves_stdio_environment_lazy() {
+        let transport = ExecServerTransportParams::StdioCommand {
+            command: StdioExecServerCommand {
+                program: "codex-missing-exec-server-for-test".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            },
+            initialize_timeout: Duration::from_secs(1),
+        };
         let manager = EnvironmentManager::from_snapshot(
             EnvironmentProviderSnapshot {
-                environments: vec![("stdio".to_string(), environment)],
+                environments: vec![("stdio".to_string(), transport)],
                 default: EnvironmentDefault::Disabled,
                 include_local: false,
             },
             /*local_runtime_paths*/ None,
+            legacy_http_client_factory(),
         )
         .expect("environment manager");
         let environment = manager.get_environment("stdio").expect("stdio environment");
@@ -1084,6 +1403,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_capability_inspection_keeps_stdio_environment_lazy() {
+        use codex_protocol::capabilities::CapabilityRootLocation;
+        use codex_protocol::capabilities::SelectedCapabilityRoot;
+
+        let transport = ExecServerTransportParams::StdioCommand {
+            command: StdioExecServerCommand {
+                program: "codex-missing-exec-server-for-test".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            },
+            initialize_timeout: Duration::from_secs(1),
+        };
+        let manager = EnvironmentManager::from_snapshot(
+            EnvironmentProviderSnapshot {
+                environments: vec![("stdio".to_string(), transport)],
+                default: EnvironmentDefault::Disabled,
+                include_local: false,
+            },
+            /*local_runtime_paths*/ None,
+            legacy_http_client_factory(),
+        )
+        .expect("environment manager");
+        let environment = manager.get_environment("stdio").expect("stdio environment");
+        let selected_root = SelectedCapabilityRoot {
+            id: "demo@1".to_string(),
+            location: CapabilityRootLocation::Environment {
+                environment_id: "stdio".to_string(),
+                path: PathUri::parse("file:///plugins/demo").expect("plugin path URI"),
+            },
+        };
+
+        let status =
+            manager.inspect_selected_capability_roots(std::slice::from_ref(&selected_root));
+        assert!(status.ready_roots.is_empty());
+        assert_eq!(status.warnings, Vec::<String>::new());
+        assert!(!environment.startup_finished());
+
+        let missing_root = SelectedCapabilityRoot {
+            id: "missing@1".to_string(),
+            location: CapabilityRootLocation::Environment {
+                environment_id: "missing".to_string(),
+                path: PathUri::parse("file:///plugins/missing").expect("missing plugin path URI"),
+            },
+        };
+        let status = manager.inspect_selected_capability_roots(&[missing_root]);
+        assert!(status.ready_roots.is_empty());
+        assert_eq!(
+            status.warnings,
+            vec![
+                "selected capability root `missing@1` references unavailable environment `missing`"
+                    .to_string()
+            ]
+        );
+
+        assert!(environment.wait_until_ready().await.is_err());
+
+        let status = manager.inspect_selected_capability_roots(&[selected_root]);
+        assert!(status.ready_roots.is_empty());
+        assert_eq!(status.warnings.len(), 1);
+        assert!(status.warnings[0].contains("environment `stdio` is unavailable"));
+    }
+
+    #[tokio::test]
     async fn replacing_environment_stops_its_startup_task() {
         let first_listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1091,7 +1474,7 @@ mod tests {
         let second_listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind second websocket listener");
-        let manager = EnvironmentManager::without_environments();
+        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
         manager
             .upsert_environment(
                 "executor-a".to_string(),
@@ -1139,7 +1522,7 @@ mod tests {
 
     #[tokio::test]
     async fn environment_manager_rejects_empty_remote_environment_url() {
-        let manager = EnvironmentManager::without_environments();
+        let manager = EnvironmentManager::without_environments(legacy_http_client_factory());
 
         let err = manager
             .upsert_environment(
@@ -1176,6 +1559,7 @@ mod tests {
                 sandbox: None,
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await
             .expect("start process");
@@ -1185,7 +1569,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_environment_passes_runtime_paths_to_exec_backend() {
-        let environment = Environment::local(test_runtime_paths());
+        let environment = Environment::local(test_runtime_paths(), legacy_http_client_factory());
         #[cfg(unix)]
         let uri = "file://server/share/checkout";
         #[cfg(windows)]
@@ -1216,6 +1600,7 @@ mod tests {
                 sandbox: Some(sandbox),
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await;
         let Err(err) = result else {

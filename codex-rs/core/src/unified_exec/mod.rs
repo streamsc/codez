@@ -116,6 +116,18 @@ pub(crate) struct WriteStdinRequest<'a> {
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
     pub truncation_policy: TruncationPolicy,
+    pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
+}
+
+pub(crate) struct WriteStdinInteractionEvent<'a> {
+    pub session: &'a Arc<Session>,
+    pub turn: &'a Arc<TurnContext>,
+}
+
+impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WriteStdinInteractionEvent")
+    }
 }
 
 #[derive(Default)]
@@ -176,6 +188,10 @@ pub(crate) fn clamp_yield_time(yield_time_ms: u64) -> u64 {
 
 pub(crate) fn resolve_max_tokens(max_tokens: Option<usize>) -> usize {
     max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+}
+
+pub(crate) fn format_output_omission_marker(omitted_bytes: usize) -> String {
+    format!("... {omitted_bytes} bytes omitted ...")
 }
 
 pub(crate) fn generate_chunk_id() -> String {

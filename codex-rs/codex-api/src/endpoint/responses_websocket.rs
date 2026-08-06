@@ -3,6 +3,7 @@ use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
+use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use crate::error::ApiError;
 use crate::provider::Provider;
 use crate::rate_limits::parse_rate_limit_event;
@@ -156,6 +157,27 @@ const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE: &str = "websocket_connection_limit_reached";
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE: &str = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.";
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE: &str = "previous_response_not_found";
+const PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE: &str =
+    "Previous response was not found. Retrying the full request.";
+const RESPONSES_WEBSOCKET_TIMING_KIND: &str = "responsesapi.websocket_timing";
+const RESPONSES_WEBSOCKET_TIMING_EVENT_TARGET: &str = "codex_api::responses_websocket_timing";
+const SESSION_ID_CLIENT_METADATA_KEY: &str = "session_id";
+const THREAD_ID_CLIENT_METADATA_KEY: &str = "thread_id";
+const TURN_ID_CLIENT_METADATA_KEY: &str = "turn_id";
+const WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str = "x-codex-ws-stream-request-start-ms";
+
+struct ResponsesWebsocketTimingLogContext {
+    model: String,
+    session_id: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    traceparent: Option<String>,
+    previous_response_id: Option<String>,
+    request_start_ms: Option<String>,
+    warmup: bool,
+    connection_reused: bool,
+}
 
 pub struct ResponsesWebsocketConnection {
     stream: Arc<Mutex<Option<WsStream>>>,
@@ -211,7 +233,7 @@ impl ResponsesWebsocketConnection {
     )]
     pub async fn stream_request(
         &self,
-        request: ResponsesWsRequest,
+        request: ResponsesWsRequest<'_>,
         connection_reused: bool,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
@@ -223,6 +245,31 @@ impl ResponsesWebsocketConnection {
         let models_etag = self.models_etag.clone();
         let server_model = self.server_model.clone();
         let telemetry = self.telemetry.clone();
+        let ResponsesWsRequest::ResponseCreate(ws_request) = &request;
+        let client_metadata = ws_request.client_metadata.as_ref();
+        let timing_log_context = ResponsesWebsocketTimingLogContext {
+            model: ws_request.model.to_string(),
+            session_id: client_metadata
+                .and_then(|metadata| metadata.get(SESSION_ID_CLIENT_METADATA_KEY))
+                .cloned(),
+            thread_id: client_metadata
+                .and_then(|metadata| metadata.get(THREAD_ID_CLIENT_METADATA_KEY))
+                .cloned(),
+            turn_id: client_metadata
+                .and_then(|metadata| metadata.get(TURN_ID_CLIENT_METADATA_KEY))
+                .cloned(),
+            traceparent: client_metadata
+                .and_then(|metadata| {
+                    metadata.get(WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY)
+                })
+                .cloned(),
+            previous_response_id: ws_request.previous_response_id.clone(),
+            request_start_ms: client_metadata
+                .and_then(|metadata| metadata.get(WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY))
+                .cloned(),
+            warmup: ws_request.generate == Some(false),
+            connection_reused,
+        };
         let request_text = serialize_websocket_request(&request)?;
 
         let current_span = Span::current();
@@ -260,8 +307,8 @@ impl ResponsesWebsocketConnection {
                         request_text,
                         idle_timeout,
                         telemetry,
-                        connection_reused,
                         turn_state.as_deref(),
+                        &timing_log_context,
                     )
                     .await
                 };
@@ -571,13 +618,19 @@ fn map_wrapped_websocket_error_event(
 
     if let Some(error) = error.as_ref()
         && let Some(code) = error.code.as_deref()
-        && code == WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE
+        && let Some(fallback_message) = match code {
+            WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE => {
+                Some(WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE)
+            }
+            PREVIOUS_RESPONSE_NOT_FOUND_CODE => Some(PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE),
+            _ => None,
+        }
     {
         return Some(ApiError::Retryable {
             message: error
                 .message
                 .clone()
-                .unwrap_or_else(|| WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE.to_string()),
+                .unwrap_or_else(|| fallback_message.to_string()),
             delay: None,
         });
     }
@@ -625,8 +678,8 @@ async fn run_websocket_response_stream(
     request_text: String,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
-    connection_reused: bool,
     turn_state: Option<&OnceLock<String>>,
+    timing_log_context: &ResponsesWebsocketTimingLogContext,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
@@ -635,7 +688,7 @@ async fn run_websocket_response_stream(
         request_text,
         idle_timeout,
         telemetry.as_ref(),
-        connection_reused,
+        timing_log_context.connection_reused,
     )
     .await?;
 
@@ -678,6 +731,11 @@ async fn run_websocket_response_stream(
                         continue;
                     }
                 };
+                emit_responses_websocket_timing_event(
+                    event.kind(),
+                    text.as_str(),
+                    timing_log_context,
+                );
                 if let Some(response_turn_state) = event.turn_state()
                     && let Some(turn_state) = turn_state
                 {
@@ -761,6 +819,35 @@ async fn run_websocket_response_stream(
     Ok(())
 }
 
+fn emit_responses_websocket_timing_event(
+    kind: &str,
+    payload: &str,
+    context: &ResponsesWebsocketTimingLogContext,
+) {
+    if kind != RESPONSES_WEBSOCKET_TIMING_KIND {
+        return;
+    }
+
+    // This full payload is excluded from always-on sinks. Opt in with
+    // `RUST_LOG='codex_api::responses_websocket_timing=trace'`.
+    tracing::event!(
+        name: RESPONSES_WEBSOCKET_TIMING_KIND,
+        target: RESPONSES_WEBSOCKET_TIMING_EVENT_TARGET,
+        tracing::Level::TRACE,
+        model = context.model.as_str(),
+        session_id = context.session_id.as_deref().unwrap_or_default(),
+        thread_id = context.thread_id.as_deref().unwrap_or_default(),
+        turn_id = context.turn_id.as_deref().unwrap_or_default(),
+        traceparent = context.traceparent.as_deref().unwrap_or_default(),
+        previous_response_id = context.previous_response_id.as_deref().unwrap_or_default(),
+        request_start_ms = context.request_start_ms.as_deref().unwrap_or_default(),
+        warmup = context.warmup,
+        connection_reused = context.connection_reused,
+        payload,
+        "responses websocket timing"
+    );
+}
+
 fn safety_buffering_for_event(
     event: &ResponsesStreamEvent,
     treatment: &mut SafetyBufferingTreatment,
@@ -805,7 +892,7 @@ async fn send_websocket_request(
     Ok(())
 }
 
-fn serialize_websocket_request(request: &ResponsesWsRequest) -> Result<String, ApiError> {
+fn serialize_websocket_request(request: &ResponsesWsRequest<'_>) -> Result<String, ApiError> {
     serde_json::to_string(request)
         .map_err(|err| ApiError::Stream(format!("failed to encode websocket request: {err}")))
 }
@@ -814,20 +901,24 @@ fn serialize_websocket_request(request: &ResponsesWsRequest) -> Result<String, A
 mod tests {
     use super::*;
     use crate::common::ResponseCreateWsRequest;
+    use crate::common::ResponsesApiRequest;
+    use codex_protocol::ResponseItemId;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use serde_json::value::RawValue;
+    use serde_json::value::to_raw_value;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn direct_serialization_preserves_websocket_request_payload() {
-        let request = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+        let api_request = ResponsesApiRequest {
             model: "gpt-test".to_string(),
             instructions: "Use the available tools.".to_string(),
-            previous_response_id: Some("resp-1".to_string()),
             input: vec![ResponseItem::Message {
-                id: Some("msg-1".to_string()),
+                id: Some(ResponseItemId::with_suffix("msg", "1")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "hello".to_string(),
@@ -835,11 +926,17 @@ mod tests {
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
             }],
-            tools: Some(vec![json!({
-                "type": "function",
-                "name": "lookup",
-                "parameters": {"type": "object"}
-            })]),
+            tools: Some(
+                Arc::<RawValue>::from(
+                    to_raw_value(&vec![json!({
+                        "type": "function",
+                        "name": "lookup",
+                        "parameters": {"type": "object"}
+                    })])
+                    .expect("serialize tools"),
+                )
+                .into(),
+            ),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: true,
             reasoning: None,
@@ -850,20 +947,28 @@ mod tests {
             service_tier: Some("priority".to_string()),
             prompt_cache_key: Some("cache-key".to_string()),
             text: None,
-            generate: Some(false),
             client_metadata: Some(HashMap::from([(
                 "traceparent".to_string(),
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string(),
             )])),
+        };
+        let request = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+            previous_response_id: Some("resp-1".to_string()),
+            generate: Some(false),
+            ..ResponseCreateWsRequest::from(&api_request)
         });
 
-        let previous_payload = serde_json::to_value(&request).expect("serialize previous payload");
+        let mut expected_payload =
+            serde_json::to_value(&api_request).expect("serialize responses API request");
+        expected_payload["type"] = json!("response.create");
+        expected_payload["previous_response_id"] = json!("resp-1");
+        expected_payload["generate"] = json!(false);
         let request_text =
             serialize_websocket_request(&request).expect("serialize websocket request");
         let wire_payload =
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
-        assert_eq!(wire_payload, previous_payload);
+        assert_eq!(wire_payload, expected_payload);
     }
 
     #[test]

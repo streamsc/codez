@@ -5,16 +5,25 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use codex_network_proxy::NetworkDecision;
+use codex_network_proxy::NetworkPolicyDecision;
+use codex_network_proxy::NetworkPolicyRequest;
+use codex_network_proxy::NetworkProtocol;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use tokio::time::timeout;
 use tokio::time::timeout_at;
+use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use super::ConnectionStatus;
 use super::ExecServerClient;
 use super::ExecServerError;
 use super::Inner;
 use super::OrderedSessionEvents;
+use super::RecoveryPolicy;
 use super::SessionState;
 use super::disconnected_message;
 use super::fail_all_in_flight_work;
@@ -24,13 +33,24 @@ use crate::client_transport::ExecServerReconnectStrategy;
 use crate::process::ExecProcessEvent;
 use crate::protocol::EXEC_READ_METHOD;
 use crate::protocol::EXEC_TERMINATE_METHOD;
+use crate::protocol::ExecServerNetworkPolicyDecision;
+use crate::protocol::ExecServerNetworkProtocol;
+use crate::protocol::MAX_NETWORK_POLICY_HOST_BYTES;
+use crate::protocol::MAX_NETWORK_POLICY_PROCESS_ID_BYTES;
+use crate::protocol::MAX_NETWORK_POLICY_REASON_BYTES;
+use crate::protocol::NETWORK_POLICY_REQUEST_METHOD;
+use crate::protocol::NetworkPolicyRequestParams;
+use crate::protocol::NetworkPolicyRequestResponse;
 use crate::protocol::ReadParams;
 use crate::protocol::ReadResponse;
 use crate::protocol::TerminateParams;
 use crate::protocol::TerminateResponse;
 use crate::rpc::RpcClient;
 use crate::rpc::RpcClientEvent;
+use crate::rpc::RpcInboundRequestAdmissionError;
 use crate::rpc::SESSION_ALREADY_ATTACHED_ERROR_CODE;
+use crate::rpc::invalid_params;
+use crate::rpc::method_not_found;
 
 #[cfg(test)]
 const SESSION_RECOVERY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -41,6 +61,7 @@ const SESSION_RECOVERY_TIMEOUT: Duration = Duration::from_secs(25);
 const SESSION_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const REGISTRY_RECOVERY_INITIAL_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const REGISTRY_RECOVERY_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const NETWORK_POLICY_DENIAL_REASON: &str = "not_allowed";
 
 impl SessionState {
     fn last_published_seq(&self) -> u64 {
@@ -78,30 +99,6 @@ impl SessionState {
             {
                 return Ok(false);
             }
-            for chunk in chunks {
-                if chunk.seq > ordered_events.last_published_seq {
-                    ordered_events
-                        .pending
-                        .entry(chunk.seq)
-                        .or_insert(ExecProcessEvent::Output(chunk));
-                }
-            }
-            if closed {
-                match ordered_events.pending.get(&target_seq) {
-                    Some(ExecProcessEvent::Closed { .. }) => {}
-                    Some(_) => {
-                        return Err(ExecServerError::Protocol(format!(
-                            "process close sequence {target_seq} conflicts with recovered output"
-                        )));
-                    }
-                    None => {
-                        ordered_events
-                            .pending
-                            .insert(target_seq, ExecProcessEvent::Closed { seq: target_seq });
-                    }
-                }
-            }
-
             let pending_exit = ordered_events.pending.range_mut(..=target_seq).find_map(
                 |(_, event)| match event {
                     ExecProcessEvent::Exited {
@@ -116,12 +113,71 @@ impl SessionState {
                 *pending_sandbox_denied =
                     Some(pending_sandbox_denied.unwrap_or(false) || sandbox_denied);
             }
-            let exit_known = ordered_events.exit_published || exit_pending;
-            let event_count = target_seq - ordered_events.last_published_seq;
-            let retained_count = ordered_events
-                .pending
-                .range(ordered_events.last_published_seq.saturating_add(1)..=target_seq)
-                .count() as u64;
+            let mut exit_known = ordered_events.exit_published || exit_pending;
+            if closed
+                && (matches!(
+                    ordered_events.pending.get(&target_seq),
+                    Some(event) if !matches!(event, ExecProcessEvent::Closed { .. })
+                ) || chunks.iter().any(|chunk| chunk.seq == target_seq))
+            {
+                return Err(ExecServerError::Protocol(format!(
+                    "process close sequence {target_seq} conflicts with recovered output"
+                )));
+            }
+            let mut published_closed = false;
+            for chunk in chunks {
+                if chunk.seq > target_seq {
+                    return Err(ExecServerError::Protocol(format!(
+                        "recovered process output sequence {} exceeds target sequence {target_seq}",
+                        chunk.seq
+                    )));
+                }
+                let next_seq = ordered_events.last_published_seq.saturating_add(1);
+                if exited && !exit_known && chunk.seq > next_seq {
+                    let exit_code = exit_code.ok_or_else(|| {
+                        ExecServerError::Protocol(
+                            "recovering exited process did not include its exit code".to_string(),
+                        )
+                    })?;
+                    ordered_events
+                        .insert_pending(ExecProcessEvent::Exited {
+                            seq: next_seq,
+                            exit_code,
+                            sandbox_denied: Some(sandbox_denied),
+                        })
+                        .map_err(ExecServerError::Protocol)?;
+                    published_closed |= self.publish_ready(&mut ordered_events);
+                    exit_known = true;
+                }
+                if chunk.seq > ordered_events.last_published_seq {
+                    ordered_events
+                        .insert_pending(ExecProcessEvent::Output(chunk))
+                        .map_err(ExecServerError::Protocol)?;
+                    published_closed |= self.publish_ready(&mut ordered_events);
+                }
+            }
+            if closed
+                && !ordered_events.closed_published
+                && !matches!(
+                    ordered_events.pending.get(&target_seq),
+                    Some(ExecProcessEvent::Closed { .. })
+                )
+            {
+                ordered_events
+                    .insert_pending(ExecProcessEvent::Closed { seq: target_seq })
+                    .map_err(ExecServerError::Protocol)?;
+            }
+
+            let event_count = target_seq.saturating_sub(ordered_events.last_published_seq);
+            let first_unpublished_seq = ordered_events.last_published_seq.saturating_add(1);
+            let retained_count = if first_unpublished_seq <= target_seq {
+                ordered_events
+                    .pending
+                    .range(first_unpublished_seq..=target_seq)
+                    .count() as u64
+            } else {
+                0
+            };
             let missing_count = event_count.saturating_sub(retained_count);
             if exited && !exit_known {
                 if missing_count != 1 {
@@ -133,18 +189,18 @@ impl SessionState {
                         "recovering exited process did not include its exit code".to_string(),
                     )
                 })?;
-                ordered_events.pending.insert(
-                    seq,
-                    ExecProcessEvent::Exited {
+                ordered_events
+                    .insert_pending(ExecProcessEvent::Exited {
                         seq,
                         exit_code,
                         sandbox_denied: Some(sandbox_denied),
-                    },
-                );
+                    })
+                    .map_err(ExecServerError::Protocol)?;
             } else if missing_count != 0 {
                 return Err(recovery_gap_error(target_seq));
             }
-            self.publish_ready(&mut ordered_events)
+            published_closed |= self.publish_ready(&mut ordered_events);
+            published_closed
         };
 
         self.note_change(target_seq);
@@ -262,7 +318,7 @@ impl Inner {
                 ConnectionStatus::Connected(current)
                     if Arc::ptr_eq(current, &failed_rpc_client) =>
                 {
-                    connection.status = ConnectionStatus::Recovering;
+                    connection.set_status(ConnectionStatus::Recovering);
                     true
                 }
                 ConnectionStatus::Connected(_)
@@ -375,7 +431,7 @@ impl Inner {
             {
                 false
             } else {
-                connection.status = ConnectionStatus::Connected(rpc_client);
+                connection.set_status(ConnectionStatus::Connected(rpc_client));
                 true
             }
         };
@@ -402,6 +458,7 @@ impl Inner {
         let rpc_client = Arc::new(rpc_client);
         let client = ExecServerClient {
             inner: Arc::clone(self),
+            recovery_policy: RecoveryPolicy::Wait,
         };
         // Resuming a session redirects notifications from its running processes
         // to this connection during initialize. Drain them immediately so a
@@ -475,7 +532,7 @@ impl Inner {
             match &connection.status {
                 ConnectionStatus::Failed(existing) => (existing.clone(), false),
                 ConnectionStatus::Connected(_) | ConnectionStatus::Recovering => {
-                    connection.status = ConnectionStatus::Failed(message.clone());
+                    connection.set_status(ConnectionStatus::Failed(message.clone()));
                     (message, true)
                 }
             }
@@ -494,14 +551,205 @@ impl ExecServerClient {
         mut events_rx: mpsc::Receiver<RpcClientEvent>,
     ) {
         let inner = Arc::downgrade(&self.inner);
+        let rpc_inbound_request_slots = Arc::clone(&self.inner.rpc_inbound_request_slots);
         let rpc_client = Arc::downgrade(rpc_client);
+        let connection_cancelled = CancellationToken::new();
+        let connection_cancel_guard = connection_cancelled.clone().drop_guard();
         tokio::spawn(async move {
+            let _connection_cancel_guard = connection_cancel_guard;
             while let Some(event) = events_rx.recv().await {
                 let (Some(inner), Some(rpc_client)) = (inner.upgrade(), rpc_client.upgrade())
                 else {
                     return;
                 };
                 match event {
+                    RpcClientEvent::Request(request) => {
+                        if request.method != NETWORK_POLICY_REQUEST_METHOD {
+                            let error = method_not_found(format!(
+                                "exec-server client does not implement `{}` yet",
+                                request.method
+                            ));
+                            if rpc_client.respond_error(request.id, error).await.is_err() {
+                                inner.request_recovery(
+                                    rpc_client,
+                                    disconnected_message(/*reason*/ None),
+                                );
+                                return;
+                            }
+                            continue;
+                        }
+
+                        let request_guard = match rpc_client
+                            .admit_inbound_request(&request.id, &rpc_inbound_request_slots)
+                        {
+                            Ok(request_guard) => request_guard,
+                            Err(RpcInboundRequestAdmissionError::InvalidRequestId) => {
+                                rpc_client.close_transport().await;
+                                inner.request_recovery(
+                                    rpc_client,
+                                    "exec-server sent an invalid request ID".to_string(),
+                                );
+                                return;
+                            }
+                            Err(RpcInboundRequestAdmissionError::DuplicateRequestId) => {
+                                rpc_client.close_transport().await;
+                                inner.request_recovery(
+                                    rpc_client,
+                                    "exec-server reused an in-flight request ID".to_string(),
+                                );
+                                return;
+                            }
+                            Err(RpcInboundRequestAdmissionError::AtCapacity) => {
+                                let response = NetworkPolicyRequestResponse {
+                                    decision: ExecServerNetworkPolicyDecision::Deny {
+                                        reason: NETWORK_POLICY_DENIAL_REASON.to_string(),
+                                    },
+                                };
+                                if rpc_client.respond(request.id, &response).await.is_err() {
+                                    inner.request_recovery(
+                                        rpc_client,
+                                        disconnected_message(/*reason*/ None),
+                                    );
+                                    return;
+                                }
+                                continue;
+                            }
+                        };
+                        let request_id = request.id;
+                        let params: NetworkPolicyRequestParams =
+                            match serde_json::from_value(request.params.unwrap_or(Value::Null)) {
+                                Ok(params) => params,
+                                Err(_) => {
+                                    let error = invalid_params(
+                                        "invalid network policy request params".to_string(),
+                                    );
+                                    if rpc_client.respond_error(request_id, error).await.is_err() {
+                                        inner.request_recovery(
+                                            rpc_client,
+                                            disconnected_message(/*reason*/ None),
+                                        );
+                                        return;
+                                    }
+                                    continue;
+                                }
+                            };
+                        let process_id = params.process_id;
+                        let request = params.request;
+                        let process_id_valid = !process_id.is_empty()
+                            && process_id.len() <= MAX_NETWORK_POLICY_PROCESS_ID_BYTES;
+                        let host_valid = !request.host.is_empty()
+                            && request.host.len() <= MAX_NETWORK_POLICY_HOST_BYTES
+                            && !request.host.chars().any(char::is_control)
+                            && !request.host.chars().any(char::is_whitespace);
+                        let session = (process_id_valid && host_valid)
+                            .then(|| inner.get_session(&process_id))
+                            .flatten();
+                        let controller = session
+                            .as_ref()
+                            .and_then(|session| session.network_policy_controller.load_full());
+                        let process_cancelled = session
+                            .as_ref()
+                            .map(|session| session.network_policy_cancelled.clone());
+                        let expected_session = session.as_ref().map(Arc::downgrade);
+                        let policy_request =
+                            (process_id_valid && host_valid).then_some(NetworkPolicyRequest {
+                                protocol: match request.protocol {
+                                    ExecServerNetworkProtocol::Http => NetworkProtocol::Http,
+                                    ExecServerNetworkProtocol::HttpsConnect => {
+                                        NetworkProtocol::HttpsConnect
+                                    }
+                                    ExecServerNetworkProtocol::Socks5Tcp => {
+                                        NetworkProtocol::Socks5Tcp
+                                    }
+                                    ExecServerNetworkProtocol::Socks5Udp => {
+                                        NetworkProtocol::Socks5Udp
+                                    }
+                                },
+                                host: request.host,
+                                port: request.port,
+                                environment_id: None,
+                                client_addr: None,
+                                method: None,
+                                command: None,
+                                exec_policy_hint: None,
+                                execution_id: None,
+                            });
+                        let inner = Arc::downgrade(&inner);
+                        let rpc_client = Arc::downgrade(&rpc_client);
+                        let connection_cancelled = connection_cancelled.clone();
+                        tokio::spawn(async move {
+                            let _request_guard = request_guard;
+                            let decision = match (controller, policy_request, process_cancelled) {
+                                (Some(controller), Some(request), Some(process_cancelled)) => {
+                                    // Core's pending-approval guard makes dropping this
+                                    // future on process removal or deadline fail closed.
+                                    tokio::select! {
+                                        biased;
+                                        _ = connection_cancelled.cancelled() => return,
+                                        _ = process_cancelled.cancelled() => {
+                                            NetworkDecision::deny(NETWORK_POLICY_DENIAL_REASON)
+                                        }
+                                        decision = timeout(
+                                            controller.timeout,
+                                            controller.decider.decide(request),
+                                        ) => decision.unwrap_or_else(|_| {
+                                            NetworkDecision::deny(NETWORK_POLICY_DENIAL_REASON)
+                                        }),
+                                    }
+                                }
+                                (None, _, _) | (_, None, _) | (_, _, None) => {
+                                    NetworkDecision::deny(NETWORK_POLICY_DENIAL_REASON)
+                                }
+                            };
+                            if let Some(expected_session) = expected_session {
+                                let (Some(inner), Some(expected_session)) =
+                                    (inner.upgrade(), expected_session.upgrade())
+                                else {
+                                    return;
+                                };
+                                if !inner
+                                    .get_session(&process_id)
+                                    .is_some_and(|session| Arc::ptr_eq(&session, &expected_session))
+                                {
+                                    return;
+                                }
+                            }
+                            let Some(rpc_client) = rpc_client.upgrade() else {
+                                return;
+                            };
+                            let decision = match decision {
+                                NetworkDecision::Allow => ExecServerNetworkPolicyDecision::Allow,
+                                NetworkDecision::Deny {
+                                    reason, decision, ..
+                                } if reason.len() <= MAX_NETWORK_POLICY_REASON_BYTES
+                                    && !reason.chars().any(char::is_control) =>
+                                {
+                                    match decision {
+                                        NetworkPolicyDecision::Deny => {
+                                            ExecServerNetworkPolicyDecision::Deny { reason }
+                                        }
+                                        NetworkPolicyDecision::Ask => {
+                                            ExecServerNetworkPolicyDecision::Ask { reason }
+                                        }
+                                    }
+                                }
+                                NetworkDecision::Deny { .. } => {
+                                    ExecServerNetworkPolicyDecision::Deny {
+                                        reason: NETWORK_POLICY_DENIAL_REASON.to_string(),
+                                    }
+                                }
+                            };
+                            if let Err(error) = rpc_client
+                                .respond(request_id, &NetworkPolicyRequestResponse { decision })
+                                .await
+                            {
+                                debug!(
+                                    ?error,
+                                    "failed to send network policy decision to exec-server"
+                                );
+                            }
+                        });
+                    }
                     RpcClientEvent::Notification(notification) => {
                         if let Err(error) = handle_server_notification(&inner, notification).await {
                             rpc_client.close_transport().await;
@@ -547,12 +795,12 @@ fn is_retryable_registry_error(error: &ExecServerError) -> bool {
         error,
         ExecServerError::EnvironmentRegistryHttp { status, code, .. }
             if status.is_server_error()
-                || *status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || *status == http::StatusCode::REQUEST_TIMEOUT
+                || *status == http::StatusCode::TOO_MANY_REQUESTS
                 // TODO: Replace this coarse retry with an explicit registry/presence
                 // recovery FSM so `environment_offline` is retried only while the
                 // executor is expected to reconnect.
-                || (*status == reqwest::StatusCode::CONFLICT
+                || (*status == http::StatusCode::CONFLICT
                     && code.as_deref() == Some("environment_offline"))
     )
 }

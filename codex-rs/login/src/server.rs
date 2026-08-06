@@ -27,7 +27,7 @@ use std::time::Duration;
 use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
 use crate::auth::save_auth;
-use crate::default_client::build_raw_auth_reqwest_client;
+use crate::default_client::create_raw_auth_client;
 use crate::default_client::originator;
 use crate::outbound_proxy::AuthRouteConfig;
 use crate::pkce::PkceCodes;
@@ -77,7 +77,7 @@ pub struct ServerOptions {
     pub login_success_page: LoginSuccessPage,
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub auth_keyring_backend_kind: AuthKeyringBackendKind,
-    pub auth_route_config: Option<AuthRouteConfig>,
+    pub auth_route_config: AuthRouteConfig,
 }
 
 impl ServerOptions {
@@ -88,7 +88,7 @@ impl ServerOptions {
         forced_chatgpt_workspace_id: Option<Vec<String>>,
         cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
         auth_keyring_backend_kind: AuthKeyringBackendKind,
-        auth_route_config: Option<AuthRouteConfig>,
+        auth_route_config: AuthRouteConfig,
     ) -> Self {
         Self {
             codex_home,
@@ -387,7 +387,7 @@ async fn process_request(
                 redirect_uri,
                 pkce,
                 &code,
-                opts.auth_route_config.as_ref(),
+                &opts.auth_route_config,
             )
             .await
             {
@@ -409,7 +409,7 @@ async fn process_request(
                         &opts.issuer,
                         &opts.client_id,
                         &tokens.id_token,
-                        opts.auth_route_config.as_ref(),
+                        &opts.auth_route_config,
                     )
                     .await
                     .ok();
@@ -754,8 +754,10 @@ fn redact_sensitive_url_parts(url: &mut url::Url) {
     url.set_query(Some(&redacted_query));
 }
 
-/// Redacts any URL attached to a reqwest transport error before it is logged or returned.
-fn redact_sensitive_error_url(mut err: reqwest::Error) -> reqwest::Error {
+/// Redacts any URL attached to an HTTP transport error before it is logged or returned.
+fn redact_sensitive_error_url(
+    mut err: codex_http_client::HttpError,
+) -> codex_http_client::HttpError {
     if let Some(url) = err.url_mut() {
         redact_sensitive_url_parts(url);
     }
@@ -787,7 +789,7 @@ pub(crate) async fn exchange_code_for_tokens(
     redirect_uri: &str,
     pkce: &PkceCodes,
     code: &str,
-    auth_route_config: Option<&AuthRouteConfig>,
+    auth_route_config: &AuthRouteConfig,
 ) -> io::Result<ExchangedTokens> {
     #[derive(serde::Deserialize)]
     struct TokenResponse {
@@ -798,7 +800,7 @@ pub(crate) async fn exchange_code_for_tokens(
 
     // The route selected for the issuer is reused for token exchange; the token endpoint path is
     // not resolved separately.
-    let client = build_raw_auth_reqwest_client(issuer.trim_end_matches('/'), auth_route_config)?;
+    let client = create_raw_auth_client(issuer.trim_end_matches('/'), auth_route_config)?;
     let token_endpoint = format!("{}/oauth/token", issuer.trim_end_matches('/'));
     info!(
         issuer = %sanitize_url_for_logging(issuer),
@@ -1112,7 +1114,7 @@ pub(crate) async fn obtain_api_key(
     issuer: &str,
     client_id: &str,
     id_token: &str,
-    auth_route_config: Option<&AuthRouteConfig>,
+    auth_route_config: &AuthRouteConfig,
 ) -> io::Result<String> {
     // Token exchange for an API key access token
     #[derive(serde::Deserialize)]
@@ -1120,7 +1122,7 @@ pub(crate) async fn obtain_api_key(
         access_token: String,
     }
     let token_endpoint = format!("{}/oauth/token", issuer.trim_end_matches('/'));
-    let client = build_raw_auth_reqwest_client(&token_endpoint, auth_route_config)?;
+    let client = create_raw_auth_client(&token_endpoint, auth_route_config)?;
     let resp = client
         .post(token_endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")

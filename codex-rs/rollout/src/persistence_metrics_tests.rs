@@ -51,7 +51,9 @@ fn turn_started(turn_id: &str) -> RolloutItem {
 fn turn_complete(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: turn_id.to_string(),
+        started_at: None,
         last_agent_message: None,
+        error: None,
         completed_at: None,
         duration_ms: None,
         time_to_first_token_ms: None,
@@ -61,6 +63,7 @@ fn turn_complete(turn_id: &str) -> RolloutItem {
 fn turn_aborted(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
         turn_id: Some(turn_id.to_string()),
+        started_at: None,
         reason: TurnAbortReason::Interrupted,
         completed_at: None,
         duration_ms: None,
@@ -255,6 +258,7 @@ fn item_completion_persistence_depends_on_history_mode() {
             client_id: None,
             content: Vec::new(),
         }),
+        started_at_ms: Some(0),
         completed_at_ms: 0,
     }));
 
@@ -296,6 +300,7 @@ fn review_mode_persistence_depends_on_history_mode() {
                 },
                 user_facing_hint: "Review requested.".to_string(),
             }),
+            started_at_ms: Some(0),
             completed_at_ms: 0,
         })),
         RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -305,6 +310,7 @@ fn review_mode_persistence_depends_on_history_mode() {
                 id: "exited-review".to_string(),
                 review_output: None,
             }),
+            started_at_ms: Some(0),
             completed_at_ms: 0,
         })),
     ];

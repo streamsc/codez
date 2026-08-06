@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
+use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_models_manager::manager::RefreshStrategy;
@@ -27,9 +28,11 @@ use core_test_support::test_codex::test_codex;
 use serde_json::Value;
 use std::time::Duration;
 use std::time::Instant;
+use test_case::test_case;
 use tokio::time::sleep;
 
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
 
 fn spawn_agent_description(body: &Value) -> Option<String> {
@@ -37,6 +40,12 @@ fn spawn_agent_description(body: &Value) -> Option<String> {
         .and_then(|tool| tool.get("description"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+fn spawn_agent_exposes_agent_type(body: &Value, namespace: &str) -> bool {
+    namespace_child_tool(body, namespace, SPAWN_AGENT_TOOL_NAME)
+        .and_then(|tool| tool.pointer("/parameters/properties/agent_type"))
+        .is_some()
 }
 
 fn test_model_info(
@@ -62,6 +71,7 @@ fn test_model_info(
         supports_search_tool: false,
         use_responses_lite: false,
         auto_review_model_override: None,
+        model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
         priority: 1,
@@ -72,7 +82,7 @@ fn test_model_info(
         base_instructions: "base instructions".to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -238,6 +248,116 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     assert!(
         !description.contains("A mini model can solve many tasks faster than the main model."),
         "spawn_agent description should not encourage choosing a smaller model by default: {description:?}"
+    );
+
+    Ok(())
+}
+
+#[test_case(false, false, MULTI_AGENT_V1_NAMESPACE; "v1 hides agent type without roles")]
+#[test_case(true, true, "collaboration"; "v2 exposes agent type with a role")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_agent_roles_control_spawn_agent_type(
+    multi_agent_v2: bool,
+    has_agent_role: bool,
+    namespace: &str,
+) -> Result<()> {
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            if multi_agent_v2 {
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            } else {
+                config
+                    .features
+                    .disable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            }
+            if has_agent_role {
+                config.agent_roles.insert(
+                    "researcher".to_string(),
+                    AgentRoleConfig {
+                        description: Some("Research role".to_string()),
+                        config_file: None,
+                        nickname_candidates: None,
+                    },
+                );
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("hello").await?;
+
+    assert_eq!(
+        spawn_agent_exposes_agent_type(&response.single_request().body_json(), namespace),
+        has_agent_role
+    );
+    Ok(())
+}
+
+#[test_case(true, false; "wait agent remains available without clock sleep")]
+#[test_case(true, true; "wait agent remains available with clock sleep")]
+#[test_case(false, false; "wait agent can be disabled without clock sleep")]
+#[test_case(false, true; "wait agent can be disabled with clock sleep")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_v2_wait_agent_tool_follows_configuration(
+    wait_agent_enabled: bool,
+    sleep_tool_enabled: bool,
+) -> Result<()> {
+    let current_time_reminder = if sleep_tool_enabled {
+        r#"
+[features.current_time_reminder]
+enabled = true
+sleep_tool = true
+"#
+    } else {
+        ""
+    };
+    let config_toml = format!(
+        r#"
+[features.multi_agent_v2]
+enabled = true
+wait_agent_enabled = {wait_agent_enabled}
+{current_time_reminder}"#
+    );
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_pre_build_hook(move |home| {
+            std::fs::write(home.join("config.toml"), &config_toml)
+                .expect("write multi-agent configuration");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("hello").await?;
+
+    let request = response.single_request();
+    let body = request.body_json();
+    assert!(namespace_child_tool(&body, MULTI_AGENT_V2_NAMESPACE, SPAWN_AGENT_TOOL_NAME).is_some());
+    assert_eq!(
+        namespace_child_tool(&body, MULTI_AGENT_V2_NAMESPACE, "wait_agent").is_some(),
+        wait_agent_enabled
+    );
+    assert_eq!(
+        namespace_child_tool(&body, "clock", "sleep").is_some(),
+        sleep_tool_enabled
     );
 
     Ok(())

@@ -271,7 +271,7 @@ impl App {
                     "failed to refresh effective config after an overridden write"
                 );
                 self.chat_widget.add_error_message(format!(
-                    "{setting} were saved, but Codez could not refresh the effective config: {err}"
+                    "{setting} were saved, but Codex could not refresh the effective config: {err}"
                 ));
                 None
             }
@@ -1419,21 +1419,21 @@ mod tests {
             .expect("session flags layer stack");
             assert_eq!(app.resume_model_settings(), expected);
 
-            app.config.config_layer_stack = ConfigLayerStack::default().with_user_config_profile(
-                &profile_path,
-                Some(&profile),
-                config,
-            );
+            app.config.config_layer_stack = ConfigLayerStack::default()
+                .with_user_config_profile(&profile_path, Some(&profile), config)
+                .expect("user config profile layer stack");
             assert_eq!(app.resume_model_settings(), expected);
         }
 
-        app.config.config_layer_stack = ConfigLayerStack::default().with_user_config(
-            &profile_path,
-            TomlValue::Table(toml::map::Map::from_iter([(
-                "model_reasoning_effort".to_string(),
-                TomlValue::String("high".to_string()),
-            )])),
-        );
+        app.config.config_layer_stack = ConfigLayerStack::default()
+            .with_user_config(
+                &profile_path,
+                TomlValue::Table(toml::map::Map::from_iter([(
+                    "model_reasoning_effort".to_string(),
+                    TomlValue::String("high".to_string()),
+                )])),
+            )
+            .expect("user config layer stack");
         assert_eq!(
             app.resume_model_settings(),
             crate::app_server_session::ResumeModelSettings::RestoreFromThread

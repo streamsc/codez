@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::error::CodexErrorDetails;
 
 impl AgentControl {
     /// Submit a shutdown request for a live agent without marking it explicitly closed in
@@ -6,8 +7,8 @@ impl AgentControl {
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
-            thread.codex.session.ensure_rollout_materialized().await;
-            thread.codex.session.flush_rollout().await?;
+            thread.session.ensure_rollout_materialized().await;
+            thread.session.flush_rollout().await?;
             let result = if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
                 Ok(String::new())
             } else {
@@ -43,7 +44,9 @@ impl AgentControl {
                     warn!("failed to persist thread-spawn edge status for {agent_id}: {err}");
                 }
             }
-            Err(CodexErr::ThreadNotFound(_)) if known_agent => {
+            Err(err)
+                if known_agent && matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) =>
+            {
                 if let Some(agent_graph_store) = state.agent_graph_store()
                     && let Err(err) = agent_graph_store
                         .set_thread_spawn_edge_status(
@@ -57,13 +60,19 @@ impl AgentControl {
                     )));
                 }
             }
-            Err(CodexErr::ThreadNotFound(_)) => {}
+            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {}
             Err(err) => {
                 warn!("failed to inspect agent before close {agent_id}: {err}");
             }
         }
         match Box::pin(self.shutdown_agent_tree(agent_id)).await {
-            Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) if known_agent => {
+            Err(err)
+                if known_agent
+                    && matches!(
+                        err.details(),
+                        CodexErrorDetails::ThreadNotFound(_) | CodexErrorDetails::InternalAgentDied
+                    ) =>
+            {
                 Ok(String::new())
             }
             result => result,
@@ -76,7 +85,12 @@ impl AgentControl {
         let result = self.shutdown_live_agent(agent_id).await;
         for descendant_id in descendant_ids {
             match self.shutdown_live_agent(descendant_id).await {
-                Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {}
+                Ok(_) => {}
+                Err(err)
+                    if matches!(
+                        err.details(),
+                        CodexErrorDetails::ThreadNotFound(_) | CodexErrorDetails::InternalAgentDied
+                    ) => {}
                 Err(err) => return Err(err),
             }
         }

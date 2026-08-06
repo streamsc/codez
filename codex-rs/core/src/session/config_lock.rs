@@ -93,13 +93,17 @@ fn session_configuration_to_lock_config_toml(
         .effective_config()
         .try_into()
         .context("failed to deserialize effective config for config lock")?;
-
     if config.config_lock_save_fields_resolved_from_model_catalog {
         save_session_resolved_fields(sc, &mut lock_config);
     }
 
     save_config_resolved_fields(config, &mut lock_config)?;
     drop_lockfile_inputs(&mut lock_config);
+    // Apply exact managed values last so cleanup cannot discard their runtime-effective values.
+    config
+        .config_layer_stack
+        .requirements_toml()
+        .apply_exact_to_config(&mut lock_config);
 
     Ok(lock_config)
 }
@@ -177,15 +181,12 @@ fn save_config_resolved_fields(
     )?);
 
     let agents = lock_config.agents.get_or_insert_with(Default::default);
-    // Multi-agent v2 owns thread fanout through its feature config. Preserve
-    // the legacy agents.max_threads setting only when v2 is disabled.
-    agents.max_threads = if config.features.enabled(Feature::MultiAgentV2) {
-        None
-    } else {
-        config.agent_max_threads
-    };
+    agents.enabled = Some(config.agents_enabled);
+    agents.max_concurrent_threads_per_session = config.agent_max_threads;
     agents.max_depth = Some(config.agent_max_depth);
-    agents.job_max_runtime_seconds = config.agent_job_max_runtime_seconds;
+    agents.default_subagent_model = config.agent_default_subagent_model.clone();
+    agents.default_subagent_reasoning_effort =
+        config.agent_default_subagent_reasoning_effort.clone();
     agents.interrupt_message = Some(config.agent_interrupt_message_enabled);
 
     lock_config
@@ -238,8 +239,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_config::test_support::CloudConfigBundleFixture;
+    use codex_models_manager::bundled_models_response;
     use pretty_assertions::assert_eq;
+    use std::path::Path;
     use std::sync::Arc;
+
+    fn write_model_catalog(path: &Path) {
+        let mut catalog = bundled_models_response()
+            .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+        catalog.models = catalog.models.into_iter().take(1).collect();
+        std::fs::write(
+            path,
+            serde_json::to_string(&catalog).expect("serialize model catalog"),
+        )
+        .expect("write model catalog");
+    }
 
     #[tokio::test]
     async fn lock_contains_prompts_and_materializes_features() {
@@ -249,6 +264,8 @@ mod tests {
             reminder_threshold_tokens: Some(16_000),
             reminder_message_template: "Locked reminder: {n_remaining} tokens.".to_string(),
             guidance_message: Some("Locked context-window guidance.".to_string()),
+            auto_compact_fallback_prompt: Some("Write notes before rollover.".to_string()),
+            auto_compact_fallback_buffer_tokens: Some(8_000),
         });
         config
             .features
@@ -293,7 +310,6 @@ mod tests {
                 .is_none_or(|debug| debug.config_lockfile.is_none())
         );
         assert!(lock.memories.is_some());
-
         let features = lock
             .features
             .as_ref()
@@ -342,6 +358,8 @@ mod tests {
                     "Locked reminder: {n_remaining} tokens.".to_string()
                 ),
                 guidance_message: Some("Locked context-window guidance.".to_string()),
+                auto_compact_fallback_prompt: Some("Write notes before rollover.".to_string()),
+                auto_compact_fallback_buffer_tokens: Some(8_000),
             }))
         );
 
@@ -393,6 +411,90 @@ mod tests {
         assert_eq!(lock.personality, None);
         assert_eq!(lock.approval_policy, None);
         assert_eq!(lock.approvals_reviewer, None);
+    }
+
+    #[tokio::test]
+    async fn lock_contains_exact_managed_requirements() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let sqlite_home = codex_home.path().join("managed-state");
+        let log_dir = codex_home.path().join("managed-logs");
+        let catalog_path = codex_home.path().join("managed-models.json");
+        write_model_catalog(&catalog_path);
+        let requirements = format!(
+            r#"
+sqlite_home = {:?}
+log_dir = {:?}
+model_catalog_json = {:?}
+check_for_update_on_startup = false
+allow_login_shell = false
+
+[feedback]
+enabled = false
+
+[windows]
+sandbox_private_desktop = false
+"#,
+            sqlite_home.display(),
+            log_dir.display(),
+            catalog_path.display(),
+        );
+        let mut config = crate::config::ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
+            )
+            .build()
+            .await
+            .expect("config should load");
+        config.config_lock_save_fields_resolved_from_model_catalog = false;
+        let mut sc = crate::session::tests::make_session_configuration_for_tests().await;
+        sc.original_config_do_not_use = Arc::new(config);
+
+        let lockfile = sc.to_config_lockfile_toml().expect("lock should serialize");
+        let lock = &lockfile.config;
+
+        assert_eq!(lock.sqlite_home.as_deref(), Some(sqlite_home.as_path()));
+        assert_eq!(lock.log_dir.as_deref(), Some(log_dir.as_path()));
+        assert_eq!(
+            lock.model_catalog_json.as_deref(),
+            Some(catalog_path.as_path())
+        );
+        assert_eq!(lock.check_for_update_on_startup, Some(false));
+        assert_eq!(lock.allow_login_shell, Some(false));
+        assert_eq!(
+            lock.feedback.as_ref().and_then(|feedback| feedback.enabled),
+            Some(false)
+        );
+        assert_eq!(
+            lock.windows
+                .as_ref()
+                .and_then(|windows| windows.sandbox_private_desktop),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_drops_unmanaged_model_catalog_input() {
+        let codex_home = tempfile::tempdir().expect("create temp dir");
+        let catalog_path = codex_home.path().join("user-models.json");
+        write_model_catalog(&catalog_path);
+        let config = crate::config::ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .cli_overrides(vec![(
+                "model_catalog_json".to_string(),
+                toml::Value::String(catalog_path.display().to_string()),
+            )])
+            .build()
+            .await
+            .expect("config should load");
+        let mut sc = crate::session::tests::make_session_configuration_for_tests().await;
+        sc.original_config_do_not_use = Arc::new(config);
+
+        let lockfile = sc.to_config_lockfile_toml().expect("lock should serialize");
+
+        assert_eq!(lockfile.config.model_catalog_json, None);
     }
 
     #[tokio::test]

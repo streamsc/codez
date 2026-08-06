@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::TurnInput;
+use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
 use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
@@ -52,7 +53,7 @@ impl SessionTask for RegularTask {
                 trace_id: ctx.trace_id.clone(),
                 started_at: ctx.turn_timing_state.started_at_unix_secs().await,
                 model_context_window: ctx.model_context_window(),
-                collaboration_mode_kind: ctx.collaboration_mode.mode,
+                collaboration_mode_kind: ctx.mode,
             });
             sess.send_event(ctx.as_ref(), event).await;
             sess.set_server_reasoning_included(/*included*/ false).await;
@@ -62,7 +63,10 @@ impl SessionTask for RegularTask {
         .instrument(trace_span!("regular_task.prepare_run_turn"))
         .await;
         let prewarmed_client_session = match prewarmed_client_session {
-            SessionStartupPrewarmResolution::Cancelled => return Ok(None),
+            SessionStartupPrewarmResolution::Cancelled => {
+                run_hooks_and_record_inputs(&sess, &ctx, &input).await;
+                return Ok(None);
+            }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
             SessionStartupPrewarmResolution::Ready(prewarmed_client_session) => {
                 Some(*prewarmed_client_session)

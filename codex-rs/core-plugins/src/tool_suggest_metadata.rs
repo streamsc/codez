@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use codex_core_skills::config_rules::SkillConfigRules;
 use codex_plugin::AppDeclaration;
 use codex_plugin::PluginCapabilitySummary;
 use codex_plugin::PluginId;
@@ -11,6 +10,8 @@ use codex_plugin::app_connector_ids_from_declarations;
 use codex_plugin::prompt_safe_plugin_description;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::Product;
+use codex_skills::SkillConfigRules;
+use codex_utils_plugins::PluginIdentity;
 use tokio::sync::Semaphore;
 
 use crate::app_mcp_routing::apply_app_mcp_routing_policy;
@@ -118,6 +119,7 @@ impl ToolSuggestMetadataCache {
         marketplace_name: &str,
         plugin: &ConfiguredMarketplacePlugin,
         restriction_product: Option<Product>,
+        root_scan_slots: Arc<Semaphore>,
     ) -> Result<Arc<ToolSuggestMetadataFragment>, MarketplaceError> {
         let artifact = PluginArtifactIdentity {
             plugin_id: plugin.id.clone(),
@@ -138,7 +140,13 @@ impl ToolSuggestMetadataCache {
             }
 
             let generation = self.generation();
-            let entry = load_plugin_metadata(marketplace_name, plugin, restriction_product).await;
+            let entry = load_plugin_metadata(
+                marketplace_name,
+                plugin,
+                restriction_product,
+                Arc::clone(&root_scan_slots),
+            )
+            .await;
             if self.cache_entry_if_current(generation, artifact.clone(), entry.clone()) {
                 return entry.map_err(MarketplaceError::InvalidPlugin);
             }
@@ -186,6 +194,7 @@ async fn load_plugin_metadata(
     marketplace_name: &str,
     plugin: &ConfiguredMarketplacePlugin,
     restriction_product: Option<Product>,
+    root_scan_slots: Arc<Semaphore>,
 ) -> ToolSuggestMetadataEntry {
     let plugin_id = PluginId::new(plugin.name.clone(), marketplace_name.to_string()).map_err(
         |err| match err {
@@ -210,12 +219,17 @@ async fn load_plugin_metadata(
     }
     let manifest = load_plugin_manifest(plugin_root.as_path())
         .ok_or_else(|| "missing or invalid plugin.json".to_string())?;
+    let plugin_identity = PluginIdentity {
+        plugin_id: plugin_id.as_key(),
+        remote_plugin_id: None,
+    };
     let skill_inventory = load_plugin_skill_inventory(
         plugin_root,
-        &plugin_id,
+        &plugin_identity,
         &manifest,
         restriction_product,
         /*plugin_skill_snapshots*/ None,
+        root_scan_slots,
     )
     .await;
     let mut mcp_server_names =

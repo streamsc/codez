@@ -8,7 +8,9 @@ use codex_exec_server::ExecutorFileSystem;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
+use tokio::sync::Semaphore;
 use tracing::info;
 use tracing::instrument;
 use tracing::warn;
@@ -20,6 +22,7 @@ use crate::build_implicit_skill_path_indexes;
 use crate::config_rules::SkillConfigRules;
 use crate::config_rules::resolve_disabled_skill_paths;
 use crate::config_rules::skill_config_rules_from_stack;
+use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
 use crate::loader::SkillRoot;
 use crate::loader::load_skills_from_roots;
 use crate::loader::skill_roots;
@@ -71,6 +74,8 @@ pub struct SkillsService {
     extra_roots: RwLock<Vec<AbsolutePathBuf>>,
     cache_by_cwd: RwLock<HashMap<AbsolutePathBuf, HostSkillsSnapshot>>,
     cache_by_config: RwLock<HashMap<ConfigSkillsCacheKey, HostSkillsSnapshot>>,
+    // Shared across cwds so root scheduling cannot multiply per-root I/O fanout.
+    root_scan_slots: Arc<Semaphore>,
 }
 
 impl SkillsService {
@@ -89,6 +94,7 @@ impl SkillsService {
             extra_roots: RwLock::new(Vec::new()),
             cache_by_cwd: RwLock::new(HashMap::new()),
             cache_by_config: RwLock::new(HashMap::new()),
+            root_scan_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
         };
         if !bundled_skills_enabled {
             // The loader caches bundled skills under `skills/.system`. Clearing that directory is
@@ -213,7 +219,12 @@ impl SkillsService {
         roots: Vec<SkillRoot>,
         skill_config_rules: &SkillConfigRules,
     ) -> SkillLoadOutcome {
-        let outcome = load_skills_from_roots(roots, input.plugin_skill_snapshots.as_ref()).await;
+        let outcome = load_skills_from_roots(
+            roots,
+            input.plugin_skill_snapshots.as_ref(),
+            Arc::clone(&self.root_scan_slots),
+        )
+        .await;
         let outcome =
             crate::filter_skill_load_outcome_for_product(outcome, self.restriction_product);
         let disabled_paths = resolve_disabled_skill_paths(&outcome.skills, skill_config_rules);
@@ -270,8 +281,16 @@ impl SkillsService {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ConfigSkillsCacheKey {
-    roots: Vec<(AbsolutePathBuf, u8, Option<String>, Option<String>)>,
+    roots: Vec<ConfigSkillRootCacheKey>,
     skill_config_rules: SkillConfigRules,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConfigSkillRootCacheKey {
+    path: AbsolutePathBuf,
+    scope_rank: u8,
+    plugin_identity: Option<PluginIdentity>,
+    plugin_namespace: Option<String>,
 }
 
 pub fn bundled_skills_enabled_from_stack(
@@ -310,12 +329,12 @@ fn config_skills_cache_key(
                     SkillScope::System => 2,
                     SkillScope::Admin => 3,
                 };
-                (
-                    root.path.clone(),
+                ConfigSkillRootCacheKey {
+                    path: root.path.clone(),
                     scope_rank,
-                    root.plugin_id.clone(),
-                    root.plugin_namespace.clone(),
-                )
+                    plugin_identity: root.plugin_identity.clone(),
+                    plugin_namespace: root.plugin_namespace.clone(),
+                }
             })
             .collect(),
         skill_config_rules: skill_config_rules.clone(),

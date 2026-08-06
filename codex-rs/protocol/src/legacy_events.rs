@@ -85,6 +85,8 @@ impl UserMessageItem {
             image_details: self.image_details(),
             local_images: self.local_image_paths(),
             local_image_details: self.local_image_details(),
+            audio: Some(self.audio_urls()),
+            local_audio: self.local_audio_paths(),
             text_elements: self.text_elements(),
         }
     }
@@ -157,6 +159,8 @@ impl CommandExecutionItem {
     pub(crate) fn as_legacy_begin_event(&self, turn_id: String, started_at_ms: i64) -> EventMsg {
         EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
             call_id: self.id.clone(),
+            plugin_id: self.plugin_id.clone(),
+            script_path: self.script_path.clone(),
             process_id: self.process_id.clone(),
             turn_id,
             started_at_ms,
@@ -181,6 +185,8 @@ impl CommandExecutionItem {
         };
         Some(EventMsg::ExecCommandEnd(ExecCommandEndEvent {
             call_id: self.id.clone(),
+            plugin_id: self.plugin_id.clone(),
+            script_path: self.script_path.clone(),
             process_id: self.process_id.clone(),
             turn_id,
             completed_at_ms,
@@ -411,6 +417,7 @@ impl WebSearchItem {
             call_id: self.id.clone(),
             query: self.query.clone(),
             action: self.action.clone(),
+            results: self.results.clone(),
         })
     }
 }
@@ -464,7 +471,6 @@ impl McpToolCallItem {
             mcp_app_resource_uri: self.mcp_app_resource_uri.clone(),
             link_id: self.link_id.clone(),
             app_name: self.app_name.clone(),
-            template_id: self.template_id.clone(),
             action_name: self.action_name.clone(),
             plugin_id: self.plugin_id.clone(),
         })
@@ -488,7 +494,6 @@ impl McpToolCallItem {
             connector_id: self.connector_id.clone(),
             link_id: self.link_id.clone(),
             app_name: self.app_name.clone(),
-            template_id: self.template_id.clone(),
             action_name: self.action_name.clone(),
             plugin_id: self.plugin_id.clone(),
             duration: self.duration?,
@@ -515,7 +520,6 @@ impl TurnItem {
                     path: item.path.clone(),
                 })]
             }
-            TurnItem::Sleep(_) => Vec::new(),
             TurnItem::Extension(_) => Vec::new(),
             TurnItem::ImageGeneration(item) => vec![item.as_legacy_event()],
             TurnItem::EnteredReviewMode(_) | TurnItem::ExitedReviewMode(_) => Vec::new(),

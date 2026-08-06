@@ -4,19 +4,36 @@ use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
+use codex_exec_server::CopyOptions;
+use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::ExecutorFileSystemFuture;
+use codex_exec_server::FileMetadata;
+use codex_exec_server::FileSystemReadStream;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::LOCAL_FS;
+use codex_exec_server::ReadDirectoryEntry;
+use codex_exec_server::RemoveOptions;
+use codex_exec_server::WalkOptions;
+use codex_exec_server::WalkOutcome;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::PathUri;
 use dunce::canonicalize as canonicalize_path;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
+use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use toml::Value as TomlValue;
 
 const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
@@ -24,6 +41,154 @@ const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
 struct TestConfig {
     cwd: AbsolutePathBuf,
     config_layer_stack: ConfigLayerStack,
+}
+
+struct BlockingRepoSkillRootFileSystem {
+    inner: Arc<dyn ExecutorFileSystem>,
+    metadata_calls: Arc<BlockingMetadataCalls>,
+    blocked_walk_root: Option<PathUri>,
+    blocked_walk_gate: Semaphore,
+    walks_started: AtomicUsize,
+    walk_started: Notify,
+}
+
+struct BlockingMetadataCalls {
+    paths: Mutex<Vec<PathUri>>,
+    started: Notify,
+    release: Semaphore,
+}
+
+impl Default for BlockingMetadataCalls {
+    fn default() -> Self {
+        Self {
+            paths: Mutex::new(Vec::new()),
+            started: Notify::new(),
+            release: Semaphore::new(0),
+        }
+    }
+}
+
+impl ExecutorFileSystem for BlockingRepoSkillRootFileSystem {
+    fn canonicalize<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, PathUri> {
+        self.inner.canonicalize(path, sandbox)
+    }
+
+    fn read_file<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
+        self.inner.read_file(path, sandbox)
+    }
+
+    fn read_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
+        self.inner.read_file_stream(path, sandbox)
+    }
+
+    fn write_file<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: Vec<u8>,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner.write_file(path, contents, sandbox)
+    }
+
+    fn create_directory<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: CreateDirectoryOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner.create_directory(path, options, sandbox)
+    }
+
+    fn get_metadata<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
+        let repo_skill_root_suffix = Path::new(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
+        let Ok(path_abs) = path.to_abs_path() else {
+            return self.inner.get_metadata(path, sandbox);
+        };
+        if !path_abs.ends_with(repo_skill_root_suffix) {
+            return self.inner.get_metadata(path, sandbox);
+        }
+
+        self.metadata_calls
+            .paths
+            .lock()
+            .expect("metadata paths lock")
+            .push(path.clone());
+        self.metadata_calls.started.notify_one();
+        Box::pin(async move {
+            self.metadata_calls
+                .release
+                .acquire()
+                .await
+                .expect("metadata release semaphore")
+                .forget();
+            self.inner.get_metadata(path, sandbox).await
+        })
+    }
+
+    fn read_directory<'a>(
+        &'a self,
+        path: &'a PathUri,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
+        self.inner.read_directory(path, sandbox)
+    }
+
+    fn walk<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: WalkOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
+        self.walks_started.fetch_add(/*val*/ 1, Ordering::AcqRel);
+        self.walk_started.notify_waiters();
+        if self.blocked_walk_root.as_ref() != Some(path) {
+            return self.inner.walk(path, options, sandbox);
+        }
+        Box::pin(async move {
+            self.blocked_walk_gate
+                .acquire()
+                .await
+                .expect("blocked walk gate should remain open")
+                .forget();
+            self.inner.walk(path, options, sandbox).await
+        })
+    }
+
+    fn remove<'a>(
+        &'a self,
+        path: &'a PathUri,
+        options: RemoveOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner.remove(path, options, sandbox)
+    }
+
+    fn copy<'a>(
+        &'a self,
+        source_path: &'a PathUri,
+        destination_path: &'a PathUri,
+        options: CopyOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, ()> {
+        self.inner
+            .copy(source_path, destination_path, options, sandbox)
+    }
 }
 
 async fn make_config(codex_home: &TempDir) -> TestConfig {
@@ -129,6 +294,7 @@ async fn load_skills_for_test(config: &TestConfig) -> SkillLoadOutcome {
         )
         .await,
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await
 }
@@ -316,7 +482,12 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
         Some(&home_folder_abs),
     )
     .await;
-    let outcome = load_skills_from_roots(roots, /*plugin_skill_snapshots*/ None).await;
+    let outcome = load_skills_from_roots(
+        roots,
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
     assert!(
         outcome.errors.is_empty(),
         "unexpected errors: {:?}",
@@ -334,6 +505,7 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 
@@ -400,11 +572,13 @@ async fn load_user_skills_root(root: &Path) -> SkillLoadOutcome {
             path: root.abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: None,
+            plugin_identity: None,
             plugin_namespace: None,
             plugin_root: None,
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await
 }
@@ -420,6 +594,7 @@ fn expected_user_skill(path: &Path, name: &str, description: &str) -> SkillMetad
         path_to_skills_md: normalized(path),
         scope: SkillScope::User,
         plugin_id: None,
+        remote_plugin_id: None,
     }
 }
 
@@ -507,6 +682,7 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -563,6 +739,7 @@ interface:
             path_to_skills_md: normalized(skill_path.as_path()),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -717,6 +894,7 @@ async fn accepts_icon_paths_under_assets_dir() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -758,6 +936,7 @@ async fn ignores_invalid_brand_color() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -812,6 +991,7 @@ async fn ignores_default_prompt_over_max_length() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -854,6 +1034,7 @@ async fn drops_interface_when_icons_are_invalid() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -886,11 +1067,16 @@ interface:
             path: plugin_root.join("skills").abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: Some("twilio-developer-kit@test".to_string()),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "twilio-developer-kit@test".to_string(),
+                remote_plugin_id: None,
+            }),
             plugin_namespace: None,
             plugin_root: Some(plugin_root_abs.clone()),
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -919,6 +1105,7 @@ interface:
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: Some("twilio-developer-kit@test".to_string()),
+            remote_plugin_id: None,
         }]
     );
 }
@@ -947,11 +1134,16 @@ interface:
             path: plugin_root.join("skills").abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: Some("twilio-developer-kit@test".to_string()),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "twilio-developer-kit@test".to_string(),
+                remote_plugin_id: None,
+            }),
             plugin_namespace: None,
             plugin_root: Some(plugin_root.abs()),
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -972,6 +1164,7 @@ interface:
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: Some("twilio-developer-kit@test".to_string()),
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1017,7 +1210,34 @@ async fn loads_skills_via_symlinked_subdir_for_user_scope() {
             path_to_skills_md: normalized(&shared_skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
+    );
+}
+
+// Directory symlinks on Windows can require Developer Mode or administrator privileges.
+#[tokio::test]
+#[cfg(unix)]
+async fn loads_skills_through_visible_alias_to_hidden_directory() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let hidden_root = root.path().join(".hidden");
+    let skill_path = write_skill_at(&hidden_root, "search", "search-skill", "search description");
+    symlink_dir(&hidden_root, &root.path().join("visible"));
+
+    let outcome = load_user_skills_root(root.path()).await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![expected_user_skill(
+            &skill_path,
+            "search-skill",
+            "search description",
+        )]
     );
 }
 
@@ -1077,6 +1297,7 @@ async fn does_not_loop_on_symlink_cycle_for_user_scope() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1097,11 +1318,13 @@ async fn loads_skills_via_symlinked_subdir_for_admin_scope() {
             path: admin_root.path().abs(),
             scope: SkillScope::Admin,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: None,
+            plugin_identity: None,
             plugin_namespace: None,
             plugin_root: None,
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -1122,6 +1345,7 @@ async fn loads_skills_via_symlinked_subdir_for_admin_scope() {
             path_to_skills_md: normalized(&shared_skill_path),
             scope: SkillScope::Admin,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1162,6 +1386,7 @@ async fn loads_skills_via_symlinked_subdir_for_repo_scope() {
             path_to_skills_md: normalized(&linked_skill_path),
             scope: SkillScope::Repo,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1183,11 +1408,13 @@ async fn system_scope_ignores_symlinked_subdir() {
             path: system_root.abs(),
             scope: SkillScope::System,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: None,
+            plugin_identity: None,
             plugin_namespace: None,
             plugin_root: None,
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
     assert!(
@@ -1221,11 +1448,13 @@ async fn respects_max_scan_depth_for_user_scope() {
             path: skills_root.abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: None,
+            plugin_identity: None,
             plugin_namespace: None,
             plugin_root: None,
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -1246,6 +1475,7 @@ async fn respects_max_scan_depth_for_user_scope() {
             path_to_skills_md: normalized(&within_depth_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1274,6 +1504,7 @@ async fn loads_valid_skill() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1307,6 +1538,7 @@ async fn falls_back_to_directory_name_when_skill_name_is_missing() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1332,11 +1564,16 @@ async fn namespaces_plugin_skills_using_provided_namespace() {
             path: plugin_root.join("skills").abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: Some("sample@test".to_string()),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "sample@test".to_string(),
+                remote_plugin_id: None,
+            }),
             plugin_namespace: Some("sample".to_string()),
             plugin_root: Some(plugin_root.abs()),
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -1357,6 +1594,7 @@ async fn namespaces_plugin_skills_using_provided_namespace() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: Some("sample@test".to_string()),
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1488,48 +1726,6 @@ async fn invalid_nested_plugin_manifest_falls_back_to_outer_namespace() {
 // Directory symlinks on Windows can require Developer Mode or administrator privileges.
 #[cfg(unix)]
 #[tokio::test]
-async fn namespaces_skills_in_symlinked_plugin_skills_dir() {
-    // skills/
-    // └── linked-plugin -> shared-plugin/skills/
-    // shared-plugin/
-    // ├── .codex-plugin/plugin.json
-    // └── skills/search/SKILL.md
-    let root = tempfile::tempdir().expect("tempdir");
-    let shared_plugin_root = tempfile::tempdir().expect("tempdir");
-    write_plugin_manifest(shared_plugin_root.path(), r#"{"name":"linked"}"#);
-    let skill_path = write_skill_at(
-        &shared_plugin_root.path().join("skills"),
-        "search",
-        "search-skill",
-        "search description",
-    );
-    let skills_root = root.path().join("skills");
-    fs::create_dir_all(&skills_root).unwrap();
-    symlink_dir(
-        &shared_plugin_root.path().join("skills"),
-        &skills_root.join("linked-plugin"),
-    );
-
-    let outcome = load_user_skills_root(&skills_root).await;
-
-    assert!(
-        outcome.errors.is_empty(),
-        "unexpected errors: {:?}",
-        outcome.errors
-    );
-    assert_eq!(
-        outcome.skills,
-        vec![expected_user_skill(
-            &skill_path,
-            "linked:search-skill",
-            "search description",
-        )]
-    );
-}
-
-// Directory symlinks on Windows can require Developer Mode or administrator privileges.
-#[cfg(unix)]
-#[tokio::test]
 async fn does_not_inherit_namespace_for_skills_in_symlinked_plain_dir() {
     // outer-plugin/
     // ├── .codex-plugin/plugin.json
@@ -1621,11 +1817,16 @@ async fn plugin_skill_name_length_limit_allows_max_qualified_name() {
             path: plugin_root.join("skills").abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: Some("sample@test".to_string()),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "sample@test".to_string(),
+                remote_plugin_id: None,
+            }),
             plugin_namespace: Some(plugin_name.clone()),
             plugin_root: Some(plugin_root.abs()),
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -1646,6 +1847,7 @@ async fn plugin_skill_name_length_limit_allows_max_qualified_name() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: Some("sample@test".to_string()),
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1670,11 +1872,16 @@ async fn plugin_skill_name_length_limit_rejects_overlong_qualified_name() {
             path: plugin_root.join("skills").abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
-            plugin_id: Some("sample@test".to_string()),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "sample@test".to_string(),
+                remote_plugin_id: None,
+            }),
             plugin_namespace: Some(plugin_name.clone()),
             plugin_root: Some(plugin_root.abs()),
+            discovery_mode: SkillDiscoveryMode::Recursive,
         }],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -1685,6 +1892,83 @@ async fn plugin_skill_name_length_limit_rejects_overlong_qualified_name() {
         "expected qualified name length error, got: {:?}",
         outcome.errors
     );
+}
+
+#[tokio::test]
+async fn direct_child_discovery_ignores_nested_skills() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("plugin");
+    let skills_root = plugin_root.join("skills");
+    let direct = write_skill_at(&skills_root, "direct", "direct", "direct skill");
+    write_skill_at(&skills_root, "nested/too-deep", "too-deep", "nested skill");
+
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: skills_root.abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "plugin@test".to_string(),
+                remote_plugin_id: None,
+            }),
+            plugin_namespace: Some("plugin".to_string()),
+            plugin_root: Some(plugin_root.abs()),
+            discovery_mode: SkillDiscoveryMode::DirectChildren,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert!(outcome.errors.is_empty());
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "plugin:direct".to_string(),
+            description: "direct skill".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&direct),
+            scope: SkillScope::User,
+            plugin_id: Some("plugin@test".to_string()),
+            remote_plugin_id: None,
+        }]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_child_discovery_skips_skills_resolving_outside_plugin_root() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("plugin");
+    let skills_root = plugin_root.join("skills");
+    let outside_root = root.path().join("outside");
+    write_skill_at(&outside_root, "escaped", "escaped", "escaped skill");
+    fs::create_dir_all(&skills_root).expect("create skills root");
+    std::os::unix::fs::symlink(outside_root.join("escaped"), skills_root.join("escaped"))
+        .expect("create skill symlink");
+
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: skills_root.abs(),
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_identity: Some(PluginIdentity {
+                plugin_id: "plugin@test".to_string(),
+                remote_plugin_id: None,
+            }),
+            plugin_namespace: Some("plugin".to_string()),
+            plugin_root: Some(plugin_root.abs()),
+            discovery_mode: SkillDiscoveryMode::DirectChildren,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+
+    assert!(outcome.skills.is_empty());
 }
 
 #[tokio::test]
@@ -1715,6 +1999,7 @@ async fn loads_short_description_from_metadata() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1747,6 +2032,7 @@ async fn loads_unquoted_description_containing_colon_space() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1779,6 +2065,7 @@ async fn loads_unquoted_short_description_containing_colon_space_and_apostrophe(
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1811,6 +2098,7 @@ async fn loads_unrecognized_frontmatter_fields_that_need_quotes() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1843,6 +2131,7 @@ async fn preserves_block_scalar_body_while_repairing_other_fields() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1960,6 +2249,7 @@ async fn loads_skills_from_repo_root() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -1996,6 +2286,7 @@ async fn loads_skills_from_agents_dir_without_codex_dir() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -2050,6 +2341,7 @@ async fn loads_skills_from_all_codex_dirs_under_project_root() {
                 path_to_skills_md: normalized(&nested_skill_path),
                 scope: SkillScope::Repo,
                 plugin_id: None,
+                remote_plugin_id: None,
             },
             SkillMetadata {
                 name: "root-skill".to_string(),
@@ -2061,9 +2353,246 @@ async fn loads_skills_from_all_codex_dirs_under_project_root() {
                 path_to_skills_md: normalized(&root_skill_path),
                 scope: SkillScope::Repo,
                 plugin_id: None,
+                remote_plugin_id: None,
             },
         ]
     );
+}
+
+#[tokio::test]
+async fn repo_skill_root_search_limits_concurrent_probes_and_preserves_order() {
+    const CONCURRENCY_LIMIT: usize = 256;
+
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tempfile::tempdir().expect("tempdir");
+    mark_as_git_repo(repo_dir.path());
+
+    let mut directories = vec![repo_dir.path().to_path_buf()];
+    let mut cwd = repo_dir.path().to_path_buf();
+    for _ in 0..CONCURRENCY_LIMIT {
+        cwd.push("d");
+        directories.push(cwd.clone());
+    }
+    fs::create_dir_all(&cwd).expect("nested cwd");
+
+    let expected_roots = [0, CONCURRENCY_LIMIT / 2, CONCURRENCY_LIMIT]
+        .map(|index| {
+            directories[index]
+                .join(AGENTS_DIR_NAME)
+                .join(SKILLS_DIR_NAME)
+        })
+        .map(|path| {
+            fs::create_dir_all(&path).expect("repo skill root");
+            path.abs()
+        });
+    let expected_probes = directories
+        .iter()
+        .map(|directory| {
+            PathUri::from_abs_path(&directory.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME).abs())
+        })
+        .collect::<Vec<_>>();
+    let cfg = make_config_for_cwd(&codex_home, cwd).await;
+    let metadata_calls = Arc::new(BlockingMetadataCalls::default());
+    let fs: Arc<dyn ExecutorFileSystem> = Arc::new(BlockingRepoSkillRootFileSystem {
+        inner: Arc::clone(&LOCAL_FS),
+        metadata_calls: Arc::clone(&metadata_calls),
+        blocked_walk_root: None,
+        blocked_walk_gate: Semaphore::new(/*permits*/ 0),
+        walks_started: AtomicUsize::new(/*v*/ 0),
+        walk_started: Notify::new(),
+    });
+
+    let assertions = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let started = metadata_calls.started.notified();
+                if metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .len()
+                    >= CONCURRENCY_LIMIT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("initial repo skill root window should start");
+        assert_eq!(
+            metadata_calls
+                .paths
+                .lock()
+                .expect("metadata paths lock")
+                .as_slice(),
+            &expected_probes[..CONCURRENCY_LIMIT]
+        );
+
+        metadata_calls.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let started = metadata_calls.started.notified();
+                if metadata_calls
+                    .paths
+                    .lock()
+                    .expect("metadata paths lock")
+                    .len()
+                    > CONCURRENCY_LIMIT
+                {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await
+        .expect("next repo skill root probe should start");
+        assert_eq!(
+            metadata_calls
+                .paths
+                .lock()
+                .expect("metadata paths lock")
+                .as_slice(),
+            expected_probes.as_slice()
+        );
+
+        metadata_calls.release.add_permits(expected_probes.len());
+    };
+    let (roots, ()) = tokio::join!(
+        super::repo_agents_skill_roots(Some(fs), &cfg.config_layer_stack, &cfg.cwd),
+        assertions
+    );
+
+    assert_eq!(
+        roots.into_iter().map(|root| root.path).collect::<Vec<_>>(),
+        expected_roots
+    );
+}
+
+#[tokio::test]
+async fn merges_root_results_in_input_order_when_scans_finish_out_of_order() {
+    const ROOT_COUNT: usize = MAX_CONCURRENT_ROOT_SCANS + 1;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let roots = (0..ROOT_COUNT)
+        .map(|index| temp.path().join(format!("root-{index}")))
+        .collect::<Vec<_>>();
+    for root in &roots {
+        fs::create_dir_all(root).expect("create root");
+    }
+    let first_skill = roots[0].join("broken/SKILL.md");
+    let second_skill = roots[1].join("broken/SKILL.md");
+    for (path, contents) in [
+        (&first_skill, "missing frontmatter"),
+        (&second_skill, "also missing frontmatter"),
+    ] {
+        fs::create_dir_all(path.parent().expect("skill parent")).expect("create skill directory");
+        fs::write(path, contents).expect("write skill");
+    }
+
+    let blocked_walk_root = PathUri::from_abs_path(&roots[0].abs());
+    let file_system = Arc::new(BlockingRepoSkillRootFileSystem {
+        inner: Arc::clone(&LOCAL_FS),
+        metadata_calls: Arc::new(BlockingMetadataCalls::default()),
+        blocked_walk_root: Some(blocked_walk_root),
+        blocked_walk_gate: Semaphore::new(/*permits*/ 0),
+        walks_started: AtomicUsize::new(/*v*/ 0),
+        walk_started: Notify::new(),
+    });
+    let root_file_system: Arc<dyn ExecutorFileSystem> = file_system.clone();
+    let skill_roots = roots
+        .iter()
+        .enumerate()
+        .map(|(index, root)| SkillRoot {
+            path: root.abs(),
+            scope: if index == 0 {
+                SkillScope::Repo
+            } else {
+                SkillScope::User
+            },
+            file_system: Arc::clone(&root_file_system),
+            plugin_identity: None,
+            plugin_namespace: Some("test".to_string()),
+            plugin_root: None,
+            discovery_mode: SkillDiscoveryMode::Recursive,
+        })
+        .collect::<Vec<_>>();
+    let root_scan_slots = Semaphore::new(MAX_CONCURRENT_ROOT_SCANS);
+    let load = tokio::spawn(async move {
+        crate::root_loader::load_and_merge_skill_roots(
+            skill_roots,
+            /*plugin_skill_snapshots*/ None,
+            &root_scan_slots,
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            let started = file_system.walk_started.notified();
+            if file_system.walks_started.load(Ordering::Acquire) == ROOT_COUNT {
+                break;
+            }
+            started.await;
+        }
+    })
+    .await
+    .expect("all skill-root walks should start despite the blocked first root");
+    file_system.blocked_walk_gate.add_permits(/*n*/ 1);
+    let outcome = load.await.expect("skill-root load should finish");
+
+    assert_eq!(outcome.skills, Vec::new());
+    assert_eq!(
+        outcome.errors,
+        vec![
+            SkillError {
+                path: canonicalize_path(first_skill)
+                    .expect("canonical first skill")
+                    .abs(),
+                message: "missing YAML frontmatter delimited by ---".to_string(),
+            },
+            SkillError {
+                path: canonicalize_path(second_skill)
+                    .expect("canonical second skill")
+                    .abs(),
+                message: "missing YAML frontmatter delimited by ---".to_string(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn skill_root_scans_wait_for_shared_capacity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).expect("create root");
+    let root_scan_slots = Semaphore::new(MAX_CONCURRENT_ROOT_SCANS);
+    let held_slots = root_scan_slots
+        .try_acquire_many(
+            u32::try_from(MAX_CONCURRENT_ROOT_SCANS).expect("root scan limit should fit in u32"),
+        )
+        .expect("root scan slots should be available");
+    let load = crate::root_loader::load_and_merge_skill_roots(
+        [SkillRoot {
+            path: root.abs(),
+            scope: SkillScope::Repo,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_identity: None,
+            plugin_namespace: Some("test".to_string()),
+            plugin_root: None,
+            discovery_mode: SkillDiscoveryMode::Recursive,
+        }],
+        /*plugin_skill_snapshots*/ None,
+        &root_scan_slots,
+    );
+    tokio::pin!(load);
+
+    assert!(futures::poll!(load.as_mut()).is_pending());
+    drop(held_slots);
+    let outcome = load.await;
+
+    assert_eq!(outcome.skills, Vec::new());
+    assert_eq!(outcome.errors, Vec::new());
 }
 
 #[tokio::test]
@@ -2101,6 +2630,7 @@ async fn loads_skills_from_codex_dir_when_not_git_repo() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -2117,20 +2647,23 @@ async fn deduplicates_by_path_preferring_first_root() {
                 path: root.path().abs(),
                 scope: SkillScope::Repo,
                 file_system: Arc::clone(&LOCAL_FS),
-                plugin_id: None,
+                plugin_identity: None,
                 plugin_namespace: None,
                 plugin_root: None,
+                discovery_mode: SkillDiscoveryMode::Recursive,
             },
             SkillRoot {
                 path: root.path().abs(),
                 scope: SkillScope::User,
                 file_system: Arc::clone(&LOCAL_FS),
-                plugin_id: None,
+                plugin_identity: None,
                 plugin_namespace: None,
                 plugin_root: None,
+                discovery_mode: SkillDiscoveryMode::Recursive,
             },
         ],
         /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
 
@@ -2151,6 +2684,7 @@ async fn deduplicates_by_path_preferring_first_root() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -2193,6 +2727,7 @@ async fn keeps_duplicate_names_from_repo_and_user() {
                 path_to_skills_md: normalized(&repo_skill_path),
                 scope: SkillScope::Repo,
                 plugin_id: None,
+                remote_plugin_id: None,
             },
             SkillMetadata {
                 name: "dupe-skill".to_string(),
@@ -2204,6 +2739,7 @@ async fn keeps_duplicate_names_from_repo_and_user() {
                 path_to_skills_md: normalized(&user_skill_path),
                 scope: SkillScope::User,
                 plugin_id: None,
+                remote_plugin_id: None,
             },
         ]
     );
@@ -2267,6 +2803,7 @@ async fn keeps_duplicate_names_from_nested_codex_dirs() {
                 path_to_skills_md: first_path,
                 scope: SkillScope::Repo,
                 plugin_id: None,
+                remote_plugin_id: None,
             },
             SkillMetadata {
                 name: "dupe-skill".to_string(),
@@ -2278,6 +2815,7 @@ async fn keeps_duplicate_names_from_nested_codex_dirs() {
                 path_to_skills_md: second_path,
                 scope: SkillScope::Repo,
                 plugin_id: None,
+                remote_plugin_id: None,
             },
         ]
     );
@@ -2350,6 +2888,7 @@ async fn loads_skills_when_cwd_is_file_in_repo() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }
@@ -2409,6 +2948,7 @@ async fn loads_skills_from_system_cache_when_present() {
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::System,
             plugin_id: None,
+            remote_plugin_id: None,
         }]
     );
 }

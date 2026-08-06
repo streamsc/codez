@@ -1,9 +1,11 @@
 use super::*;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX;
 use async_channel::bounded;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
@@ -33,8 +35,20 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::time::timeout;
+
+#[tokio::test]
+async fn dropped_approval_review_fails_closed() {
+    let (tx, rx) = oneshot::channel();
+    drop(tx);
+
+    assert_eq!(
+        receive_approval_review(rx).await,
+        ReviewDecision::denied("automatic approval review could not complete")
+    );
+}
 
 #[tokio::test]
 async fn forward_events_filters_private_events_before_blocked_send_is_cancelled() {
@@ -42,11 +56,10 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
     let (session, ctx, _rx_evt) = crate::session::tests::make_session_and_context_with_rx().await;
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events,
         agent_status,
-        session: Arc::clone(&session),
         session_loop_termination: completed_session_loop_termination(),
     });
 
@@ -56,6 +69,7 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
             id: "full".to_string(),
             msg: EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-1".to_string()),
+                started_at: None,
                 reason: TurnAbortReason::Interrupted,
                 completed_at: None,
                 duration_ms: None,
@@ -66,7 +80,8 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
 
     let cancel = CancellationToken::new();
     let forward = tokio::spawn(forward_events(
-        Arc::clone(&codex),
+        Arc::clone(&io),
+        Arc::clone(&session),
         tx_out.clone(),
         session,
         ctx,
@@ -140,17 +155,15 @@ async fn forward_ops_preserves_submission_trace_context() {
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
-    let (session, _ctx, _rx_evt) = crate::session::tests::make_session_and_context_with_rx().await;
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events,
         agent_status,
-        session,
         session_loop_termination: completed_session_loop_termination(),
     });
     let (tx_ops, rx_ops) = bounded(1);
     let cancel = CancellationToken::new();
-    let forward = tokio::spawn(forward_ops(Arc::clone(&codex), rx_ops, cancel));
+    let forward = tokio::spawn(forward_ops(Arc::clone(&io), rx_ops, cancel));
 
     let submission = Submission {
         id: "sub-1".to_string(),
@@ -198,12 +211,17 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             cancel_token,
             SubAgentSource::Review,
             /*initial_history*/ None,
+            crate::session::GitEnrichmentPolicy::Fresh,
+            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         ),
     )
     .await
     .expect("cancelled delegate spawn should not hang");
 
-    assert!(matches!(result, Err(CodexErr::TurnAborted)));
+    assert!(matches!(
+        result,
+        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted)
+    ));
 }
 
 #[tokio::test]
@@ -212,16 +230,19 @@ async fn handle_request_permissions_uses_tool_call_id_for_round_trip() {
         crate::session::tests::make_session_and_context_with_rx().await;
     *parent_session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
     let parent_ctx_mut = Arc::get_mut(&mut parent_ctx).expect("single turn context ref");
-    parent_ctx_mut.environments.turn_environments[0].environment_id = "remote".to_string();
+    let TurnEnvironmentState::Ready(environment) = &mut parent_ctx_mut.environments.environments[0]
+    else {
+        panic!("expected ready primary environment");
+    };
+    environment.environment_id = "remote".to_string();
 
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events_child) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events_child,
         agent_status,
-        session: Arc::clone(&parent_session),
         session_loop_termination: completed_session_loop_termination(),
     });
 
@@ -243,13 +264,13 @@ async fn handle_request_permissions_uses_tool_call_id_for_round_trip() {
     let request_cwd = delegated_cwd.clone();
 
     let handle = tokio::spawn({
-        let codex = Arc::clone(&codex);
+        let io = Arc::clone(&io);
         let parent_session = Arc::clone(&parent_session);
         let parent_ctx = Arc::clone(&parent_ctx);
         let cancel_token = cancel_token.clone();
         async move {
             handle_request_permissions(
-                codex.as_ref(),
+                io.as_ref(),
                 &parent_session,
                 &parent_ctx,
                 RequestPermissionsEvent {
@@ -322,28 +343,29 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
     let (tx_sub, rx_sub) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_tx_events, rx_events_child) = bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (_agent_status_tx, agent_status) = watch::channel(AgentStatus::PendingInit);
-    let codex = Arc::new(Codex {
+    let io = Arc::new(SessionIo {
         tx_sub,
         rx_event: rx_events_child,
         agent_status,
-        session: Arc::clone(&parent_session),
         session_loop_termination: completed_session_loop_termination(),
     });
 
     let cancel_token = CancellationToken::new();
     let handle = tokio::spawn({
-        let codex = Arc::clone(&codex);
+        let io = Arc::clone(&io);
         let parent_session = Arc::clone(&parent_session);
         let parent_ctx = Arc::clone(&parent_ctx);
         let cancel_token = cancel_token.clone();
         async move {
             handle_exec_approval(
-                codex.as_ref(),
+                io.as_ref(),
                 "child-turn-1".to_string(),
                 &parent_session,
                 &parent_ctx,
                 ExecApprovalRequestEvent {
                     call_id: "command-item-1".to_string(),
+                    plugin_id: Some("sample@openai-curated".to_string()),
+                    script_path: Some("scripts/run.py".to_string()),
                     approval_id: Some("callback-approval-1".to_string()),
                     turn_id: "child-turn-1".to_string(),
                     environment_id: Some("remote".to_string()),
@@ -386,6 +408,14 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
     assert_eq!(
         assessment_event.target_item_id.as_deref(),
         Some("command-item-1")
+    );
+    assert_eq!(
+        assessment_event.plugin_id.as_deref(),
+        Some("sample@openai-curated")
+    );
+    assert_eq!(
+        assessment_event.script_path.as_deref(),
+        Some("scripts/run.py")
     );
     assert_eq!(assessment_event.turn_id, parent_ctx.sub_id);
     assert_eq!(

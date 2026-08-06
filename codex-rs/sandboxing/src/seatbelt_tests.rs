@@ -193,10 +193,12 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
                 value: FileSystemSpecialPath::Root,
             },
             access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path: unreadable },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
 
@@ -299,10 +301,12 @@ fn explicit_unreadable_paths_are_excluded_from_readable_roots() {
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path: root },
             access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path: unreadable },
             access: FileSystemAccessMode::Deny,
+            missing_path_behavior: None,
         },
     ]);
 
@@ -411,6 +415,7 @@ fn unreadable_glob_policy_includes_canonicalized_static_prefix() {
     policy.entries.push(FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern { pattern },
         access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
     });
 
     let seatbelt_policy = build_seatbelt_unreadable_glob_policy(&policy, temp_dir.path());
@@ -657,12 +662,12 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
     );
     let network_socket = "/tmp/codex-proxy-use";
     let explicit_socket = "/tmp/codex-browser-use";
-    let mut network_config = NetworkProxyConfig::default();
-    network_config.network.enabled = true;
-    network_config.network.mode = NetworkMode::Full;
-    network_config
-        .network
-        .set_allow_unix_sockets(vec![network_socket.to_string()]);
+    let mut network_config = NetworkProxyConfig {
+        enabled: true,
+        mode: NetworkMode::Full,
+        ..Default::default()
+    };
+    network_config.set_allow_unix_sockets(vec![network_socket.to_string()]);
     let state = build_config_state(network_config, NetworkProxyConstraints::default())?;
     let network_proxy = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
