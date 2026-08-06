@@ -46,6 +46,7 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::powershell::prefix_powershell_script_with_utf8;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
@@ -94,7 +95,7 @@ pub struct ShellRuntime {
 pub(crate) struct ApprovalKey {
     environment_id: String,
     command: Vec<String>,
-    cwd: AbsolutePathBuf,
+    cwd: PathUri,
     sandbox_permissions: SandboxPermissions,
     additional_permissions: Option<AdditionalPermissionProfile>,
 }
@@ -129,7 +130,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
         vec![ApprovalKey {
             environment_id: req.turn_environment.environment_id.clone(),
             command: canonicalize_command_for_approval(&req.command),
-            cwd: req.cwd.clone(),
+            cwd: PathUri::from_abs_path(&req.cwd),
             sandbox_permissions: req.sandbox_permissions,
             additional_permissions: req.additional_permissions.clone(),
         }]
@@ -169,6 +170,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
                             .cloned(),
                         req.additional_permissions.clone(),
                         available_decisions,
+                        /*plugin_attribution_override*/ None,
                     )
                     .await
             })
@@ -183,8 +185,9 @@ impl Approvable<ShellRequest> for ShellRuntime {
     ) -> std::io::Result<ApprovalAction> {
         Ok(ApprovalAction::Shell {
             id: ctx.call_id.to_string(),
+            environment_id: req.turn_environment.environment_id.clone(),
             command: req.command.clone(),
-            cwd: req.cwd.clone(),
+            cwd: PathUri::from_abs_path(&req.cwd),
             sandbox_permissions: req.sandbox_permissions,
             additional_permissions: req.additional_permissions.clone(),
             justification: req.justification.clone(),
@@ -208,6 +211,10 @@ impl Approvable<ShellRequest> for ShellRuntime {
 }
 
 impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+    fn workspace_roots<'a>(&self, req: &'a ShellRequest) -> &'a [PathUri] {
+        req.turn_environment.workspace_roots()
+    }
+
     fn network_approval_spec(
         &self,
         req: &ShellRequest,

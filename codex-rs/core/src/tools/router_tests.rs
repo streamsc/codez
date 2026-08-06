@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::config::Config;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::tools::context::ToolPayload;
+use crate::tools::handlers::McpHandler;
+use crate::tools::registry::CoreToolRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionRegistry;
@@ -24,6 +27,7 @@ use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_tools::default_namespace_description;
+use core_test_support::responses::strip_response_item_ids_from_json;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -105,22 +109,18 @@ fn extension_tool_test_registry() -> Arc<ExtensionRegistry<Config>> {
 
 #[tokio::test]
 async fn parallel_support_does_not_match_namespaced_local_tool_names() -> anyhow::Result<()> {
-    let (session, turn) = make_session_and_context().await;
+    let (_, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
-    let mcp_tools = session
-        .services
-        .latest_mcp_runtime()
-        .manager()
-        .list_all_tools()
-        .await;
     let router = ToolRouter::from_context(
-        step_context.as_ref(),
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_suggest_candidates: None,
-            deferred_mcp_tools: None,
-            mcp_tools: Some(mcp_tools),
+            tool_runtimes: Vec::new(),
             extension_tool_executors: Vec::new(),
+            wait_for_environment_tool_config: None,
             dynamic_tools: turn.dynamic_tools.as_slice(),
         },
         &Default::default(),
@@ -214,25 +214,27 @@ async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
     let router = ToolRouter::from_context(
-        step_context.as_ref(),
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_suggest_candidates: None,
-            deferred_mcp_tools: None,
-            mcp_tools: Some(vec![
-                mcp_tool_info(
+            tool_runtimes: vec![
+                mcp_runtime(mcp_tool_info(
                     "echo",
                     /*supports_parallel_tool_calls*/ true,
                     "mcp__echo__",
                     "query_with_delay",
-                ),
-                mcp_tool_info(
+                )),
+                mcp_runtime(mcp_tool_info(
                     "hello_echo",
                     /*supports_parallel_tool_calls*/ false,
                     "mcp__hello_echo__",
                     "query_with_delay",
-                ),
-            ]),
+                )),
+            ],
             extension_tool_executors: Vec::new(),
+            wait_for_environment_tool_config: None,
             dynamic_tools: turn.dynamic_tools.as_slice(),
         },
         &Default::default(),
@@ -265,12 +267,14 @@ async fn tools_without_handlers_do_not_support_parallel() -> anyhow::Result<()> 
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
     let router = ToolRouter::from_context(
-        step_context.as_ref(),
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_suggest_candidates: None,
-            deferred_mcp_tools: None,
-            mcp_tools: None,
+            tool_runtimes: Vec::new(),
             extension_tool_executors: Vec::new(),
+            wait_for_environment_tool_config: None,
             dynamic_tools: turn.dynamic_tools.as_slice(),
         },
         &Default::default(),
@@ -322,12 +326,14 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
     })];
 
     let router = ToolRouter::from_context(
-        step_context.as_ref(),
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_suggest_candidates: None,
-            deferred_mcp_tools: None,
-            mcp_tools: None,
+            tool_runtimes: Vec::new(),
             extension_tool_executors: Vec::new(),
+            wait_for_environment_tool_config: None,
             dynamic_tools: &dynamic_tools,
         },
         &Default::default(),
@@ -336,6 +342,10 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
     assert_eq!(
         namespace_function_names(&router.model_visible_specs(), "codex_app"),
         vec![visible_tool.to_string()]
+    );
+    assert_eq!(
+        router.deferred_tool_namespaces(),
+        BTreeMap::from([("codex_app".to_string(), "Codex app tools.".to_string())])
     );
 
     Ok(())
@@ -361,10 +371,15 @@ fn mcp_tool_info(
                 "type": "object",
             }))),
         ),
+        openai_file_input_optional_fields: Default::default(),
         connector_id: None,
         connector_name: None,
         plugin_display_names: Vec::new(),
     }
+}
+
+fn mcp_runtime(tool_info: codex_mcp::ToolInfo) -> Arc<dyn CoreToolRuntime> {
+    Arc::new(McpHandler::new(tool_info).expect("MCP tool spec should build"))
 }
 
 #[tokio::test]
@@ -389,12 +404,17 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
     expected_history_item.set_turn_id_if_missing(&turn.sub_id);
 
     let router = ToolRouter::from_context(
-        step_context.as_ref(),
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_suggest_candidates: None,
-            deferred_mcp_tools: None,
-            mcp_tools: None,
-            extension_tool_executors: extension_tool_executors(&session),
+            tool_runtimes: Vec::new(),
+            extension_tool_executors: extension_tool_executors(
+                &session,
+                &codex_extension_api::ExtensionData::new(turn.sub_id.clone()),
+            ),
+            wait_for_environment_tool_config: None,
             dynamic_tools: turn.dynamic_tools.as_slice(),
         },
         &Default::default(),
@@ -442,13 +462,13 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
             let value: serde_json::Value =
                 serde_json::from_str(&text).expect("extension tool output should be json");
             assert_eq!(
-                value,
-                json!({
+                strip_response_item_ids_from_json(value),
+                strip_response_item_ids_from_json(json!({
                     "arguments": { "message": "hello" },
                     "callId": "call-extension",
                     "conversationHistory": [expected_history_item],
                     "ok": true,
-                })
+                }))
             );
         }
         other => panic!("expected function call output, got {other:?}"),

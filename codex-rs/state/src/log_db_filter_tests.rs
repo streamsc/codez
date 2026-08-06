@@ -1,5 +1,5 @@
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
-use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
@@ -10,23 +10,27 @@ use super::*;
 async fn sqlite_sink_drops_low_level_opentelemetry_sdk_logs() {
     let codex_home =
         std::env::temp_dir().join(format!("codex-state-log-db-filter-{}", Uuid::new_v4()));
-    let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-        .await
-        .expect("initialize runtime");
+    let runtime = StateRuntime::init(
+        crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize runtime");
     let layer = start(runtime.clone());
 
     let guard = tracing_subscriber::registry()
-        .with(
-            layer
-                .clone()
-                .with_filter(Targets::new().with_default(tracing::Level::TRACE)),
-        )
+        .with(layer.clone().with_filter(default_filter()))
         .set_default();
 
     tracing::trace!(target: "opentelemetry_sdk", "dropped-trace");
     tracing::debug!(target: "opentelemetry_sdk", "dropped-debug");
     tracing::info!(target: "opentelemetry_sdk", "retained-info");
     tracing::trace!(target: "codex_state", "retained-trace");
+    tracing::trace!(
+        target: "codex_api::responses_websocket_timing",
+        payload = "complete timing payload",
+        "dropped-websocket-timing"
+    );
 
     layer.flush().await;
     drop(guard);

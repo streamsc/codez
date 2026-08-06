@@ -1,11 +1,9 @@
 name: blocking-ci
 
-# This is the single entrypoint for checks that block a PR merge. It also runs
-# after pushes to main so the same check family stays grouped in the Actions UI.
+# Upstream's full CI suite is not a Codez merge requirement. Keep it available
+# for explicit validation without starting unverified jobs on every pull request.
 on:
-  pull_request: {}
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the

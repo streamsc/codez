@@ -1,6 +1,7 @@
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -38,7 +39,6 @@ pub(crate) struct AgentMetadata {
     pub(crate) agent_path: Option<AgentPath>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
-    pub(crate) last_task_message: Option<String>,
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -83,7 +83,9 @@ impl AgentRegistry {
     ) -> Result<SpawnReservation> {
         if let Some(max_threads) = max_threads {
             if !self.try_increment_spawned(max_threads) {
-                return Err(CodexErr::AgentLimitReached { max_threads });
+                return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
+                    max_threads,
+                }));
             }
         } else {
             self.total_count.fetch_add(1, Ordering::AcqRel);
@@ -164,34 +166,6 @@ impl AgentRegistry {
             })
             .cloned()
             .collect()
-    }
-
-    pub(crate) fn update_last_task_message(&self, thread_id: ThreadId, last_task_message: String) {
-        let mut active_agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(metadata) = active_agents
-            .agent_tree
-            .values_mut()
-            .find(|metadata| metadata.agent_id == Some(thread_id))
-        {
-            metadata.last_task_message = Some(last_task_message);
-        }
-    }
-
-    pub(crate) fn clear_last_task_message(&self, thread_id: ThreadId) {
-        let mut active_agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(metadata) = active_agents
-            .agent_tree
-            .values_mut()
-            .find(|metadata| metadata.agent_id == Some(thread_id))
-        {
-            metadata.last_task_message = None;
-        }
     }
 
     fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {

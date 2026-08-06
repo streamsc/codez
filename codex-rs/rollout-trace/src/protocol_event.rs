@@ -152,6 +152,10 @@ impl Serialize for ToolRuntimePayload<'_> {
 struct ExecCommandBeginTracePayload<'a> {
     call_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     process_id: Option<&'a str>,
     turn_id: &'a str,
     started_at_ms: i64,
@@ -167,6 +171,8 @@ impl<'a> From<&'a ExecCommandBeginEvent> for ExecCommandBeginTracePayload<'a> {
     fn from(event: &'a ExecCommandBeginEvent) -> Self {
         let ExecCommandBeginEvent {
             call_id,
+            plugin_id,
+            script_path,
             process_id,
             turn_id,
             started_at_ms,
@@ -178,6 +184,8 @@ impl<'a> From<&'a ExecCommandBeginEvent> for ExecCommandBeginTracePayload<'a> {
         } = event;
         Self {
             call_id,
+            plugin_id: plugin_id.as_deref(),
+            script_path: script_path.as_deref(),
             process_id: process_id.as_deref(),
             turn_id,
             started_at_ms: *started_at_ms,
@@ -197,6 +205,10 @@ impl<'a> From<&'a ExecCommandBeginEvent> for ExecCommandBeginTracePayload<'a> {
 #[derive(Serialize)]
 struct ExecCommandEndTracePayload<'a> {
     call_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     process_id: Option<&'a str>,
     turn_id: &'a str,
@@ -220,6 +232,8 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
     fn from(event: &'a ExecCommandEndEvent) -> Self {
         let ExecCommandEndEvent {
             call_id,
+            plugin_id,
+            script_path,
             process_id,
             turn_id,
             completed_at_ms,
@@ -238,6 +252,8 @@ impl<'a> From<&'a ExecCommandEndEvent> for ExecCommandEndTracePayload<'a> {
         } = event;
         Self {
             call_id,
+            plugin_id: plugin_id.as_deref(),
+            script_path: script_path.as_deref(),
             process_id: process_id.as_deref(),
             turn_id,
             completed_at_ms: *completed_at_ms,
@@ -365,6 +381,8 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::AgentReasoningRawContent(_)
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::SessionConfigured(_)
+        | EventMsg::EnvironmentConnected(_)
+        | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::WebSearchBegin(_)
@@ -395,6 +413,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::EnteredReviewMode(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
+        | EventMsg::RawResponseCompleted(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::ItemCompleted(_)
         | EventMsg::HookStarted(_)
@@ -429,6 +448,8 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::ContextCompacted(_)
         | EventMsg::ThreadSettingsApplied(_)
+        | EventMsg::EnvironmentConnected(_)
+        | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::TokenCount(_)
         | EventMsg::AgentMessage(_)
         | EventMsg::UserMessage(_)
@@ -468,6 +489,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         | EventMsg::EnteredReviewMode(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
+        | EventMsg::RawResponseCompleted(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::ItemCompleted(_)
         | EventMsg::HookStarted(_)

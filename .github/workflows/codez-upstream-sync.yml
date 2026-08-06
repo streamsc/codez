@@ -1,8 +1,6 @@
 name: codez-upstream-sync
 
 on:
-  schedule:
-    - cron: "17 2 * * *"
   workflow_dispatch:
     inputs:
       upstream_tag:

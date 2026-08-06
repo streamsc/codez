@@ -28,7 +28,7 @@ fn model_with_shell_type(shell_type: ConfigShellToolType) -> ModelInfo {
         base_instructions: String::new(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: Default::default(),
         support_verbosity: false,
         default_verbosity: None,
@@ -48,6 +48,7 @@ fn model_with_shell_type(shell_type: ConfigShellToolType) -> ModelInfo {
         supports_search_tool: false,
         use_responses_lite: false,
         auto_review_model_override: None,
+        model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
     }

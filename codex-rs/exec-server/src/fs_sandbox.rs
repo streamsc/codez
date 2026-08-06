@@ -67,10 +67,18 @@ impl FileSystemSandboxRunner {
         request: FsHelperRequest,
     ) -> Result<FsHelperPayload, JSONRPCErrorError> {
         let cwd = sandbox_cwd(sandbox)?;
+        let native_workspace_roots = sandbox
+            .workspace_roots
+            .iter()
+            .map(native_workspace_root)
+            .collect::<Result<Vec<_>, _>>()?;
+        let workspace_roots = native_workspace_roots.as_slice();
         let native_permissions: PermissionProfile =
             sandbox.permissions.clone().try_into().map_err(|err| {
                 invalid_request(format!("invalid sandbox permission path URI: {err}"))
             })?;
+        let native_permissions =
+            native_permissions.materialize_project_roots_with_workspace_roots(workspace_roots);
         let mut file_system_policy = native_permissions.file_system_sandbox_policy();
         let helper_read_roots = if sandbox.use_legacy_landlock {
             Vec::new()
@@ -89,7 +97,8 @@ impl FileSystemSandboxRunner {
             &file_system_policy,
             network_policy,
         );
-        let command = self.sandbox_exec_request(&permission_profile, &cwd, sandbox)?;
+        let command =
+            self.sandbox_exec_request(&permission_profile, &cwd, workspace_roots, sandbox)?;
         let request_json = serde_json::to_vec(&request).map_err(json_error)?;
         run_command(command, request_json).await
     }
@@ -98,6 +107,7 @@ impl FileSystemSandboxRunner {
         &self,
         permission_profile: &PermissionProfile,
         cwd: &SandboxCwd,
+        workspace_roots: &[AbsolutePathBuf],
         sandbox_context: &FileSystemSandboxContext,
     ) -> Result<SandboxExecRequest, JSONRPCErrorError> {
         let helper = &self.runtime_paths.codex_self_exe;
@@ -117,16 +127,6 @@ impl FileSystemSandboxRunner {
             env: self.helper_env.clone(),
             managed_network: None,
             additional_permissions: None,
-        };
-        let native_workspace_roots = sandbox_context
-            .workspace_roots
-            .iter()
-            .map(native_workspace_root)
-            .collect::<Result<Vec<_>, _>>()?;
-        let workspace_roots = if native_workspace_roots.is_empty() {
-            std::slice::from_ref(&cwd.native)
-        } else {
-            native_workspace_roots.as_slice()
         };
         sandbox_manager
             .transform_for_direct_spawn(SandboxDirectSpawnTransformRequest {
@@ -206,12 +206,12 @@ fn add_helper_runtime_permissions(
     cwd: &std::path::Path,
 ) {
     if !file_system_policy.has_full_disk_read_access() {
-        let minimal_read_entry = FileSystemSandboxEntry {
-            path: FileSystemPath::Special {
+        let minimal_read_entry = FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
                 value: FileSystemSpecialPath::Minimal,
             },
-            access: FileSystemAccessMode::Read,
-        };
+            FileSystemAccessMode::Read,
+        );
         if !file_system_policy.entries.contains(&minimal_read_entry) {
             file_system_policy.entries.push(minimal_read_entry);
         }
@@ -222,12 +222,12 @@ fn add_helper_runtime_permissions(
             continue;
         }
 
-        file_system_policy.entries.push(FileSystemSandboxEntry {
-            path: FileSystemPath::Path {
+        file_system_policy.entries.push(FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
                 path: helper_read_root.clone(),
             },
-            access: FileSystemAccessMode::Read,
-        });
+            FileSystemAccessMode::Read,
+        ));
     }
 }
 
@@ -560,7 +560,12 @@ mod tests {
         };
 
         let request = runner
-            .sandbox_exec_request(&permission_profile, &sandbox_cwd, &sandbox_context)
+            .sandbox_exec_request(
+                &permission_profile,
+                &sandbox_cwd,
+                std::slice::from_ref(&sandbox_cwd.native),
+                &sandbox_context,
+            )
             .expect("sandbox exec request");
 
         assert_eq!(request.env.get(&path_key), Some(&path));
@@ -613,6 +618,7 @@ mod tests {
                 value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
             },
             access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
         }]);
         let sandbox_context = codex_file_system::FileSystemSandboxContext::from_permission_profile(
             PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
@@ -705,6 +711,7 @@ mod tests {
         FileSystemSandboxEntry {
             path: FileSystemPath::Path { path },
             access,
+            missing_path_behavior: None,
         }
     }
 
@@ -715,6 +722,7 @@ mod tests {
         FileSystemSandboxEntry {
             path: FileSystemPath::Special { value },
             access,
+            missing_path_behavior: None,
         }
     }
 }

@@ -346,7 +346,6 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
             description: custom_reasoning_effort.to_string(),
         },
     ];
-    remote_model.supports_reasoning_summaries = true;
     remote_model.default_reasoning_summary = ReasoningSummary::Detailed;
     mount_models_once(
         &server,
@@ -481,6 +480,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         supports_search_tool: false,
         use_responses_lite: false,
         auto_review_model_override: None,
+        model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
         priority: 1,
@@ -491,7 +491,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         base_instructions: "base instructions".to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -735,6 +735,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         supports_search_tool: false,
         use_responses_lite: false,
         auto_review_model_override: None,
+        model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
         priority: 1,
@@ -745,7 +746,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         base_instructions: remote_base.to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -1262,6 +1263,7 @@ fn test_remote_model_with_policy(
         supports_search_tool: false,
         use_responses_lite: false,
         auto_review_model_override: None,
+        model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
         priority,
@@ -1272,7 +1274,7 @@ fn test_remote_model_with_policy(
         base_instructions: "base instructions".to_string(),
         model_messages: None,
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,

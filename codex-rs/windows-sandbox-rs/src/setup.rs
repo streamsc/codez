@@ -9,6 +9,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use crate::allow::AllowDenyPaths;
 use crate::allow::compute_allow_paths_for_permissions;
@@ -23,6 +27,7 @@ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::setup_error::SetupErrorCode;
 use crate::setup_error::SetupFailure;
 use crate::setup_error::clear_setup_error_report;
+use crate::setup_error::extract_failure;
 use crate::setup_error::failure;
 use crate::setup_error::read_setup_error_report;
 use crate::ssh_config_dependencies::ssh_config_dependency_paths;
@@ -67,6 +72,113 @@ const WINDOWS_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
     r"C:\Program Files (x86)",
     r"C:\ProgramData",
 ];
+
+#[derive(Clone)]
+struct SharedSetupError {
+    code: Option<SetupErrorCode>,
+    message: String,
+}
+
+impl SharedSetupError {
+    fn from_error(error: &anyhow::Error) -> Self {
+        match extract_failure(error) {
+            Some(failure) => Self {
+                code: Some(failure.code),
+                message: failure.message.clone(),
+            },
+            None => Self {
+                code: None,
+                message: format!("{error:#}"),
+            },
+        }
+    }
+
+    fn into_error(self) -> anyhow::Error {
+        match self.code {
+            Some(code) => failure(code, self.message),
+            None => anyhow!(self.message),
+        }
+    }
+}
+
+struct SetupFlight {
+    result: Mutex<Option<Result<(), SharedSetupError>>>,
+    completed: Condvar,
+}
+
+impl SetupFlight {
+    fn pending() -> Self {
+        Self {
+            result: Mutex::new(None),
+            completed: Condvar::new(),
+        }
+    }
+
+    fn complete(&self, result: Result<(), SharedSetupError>) {
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        self.completed.notify_all();
+    }
+
+    fn wait(&self) -> Result<()> {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while result.is_none() {
+            result = self
+                .completed
+                .wait(result)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        match result.clone() {
+            Some(result) => result.map_err(SharedSetupError::into_error),
+            None => Err(anyhow!("setup flight completed without a result")),
+        }
+    }
+}
+
+static SETUP_FLIGHTS: OnceLock<Mutex<HashMap<String, Arc<SetupFlight>>>> = OnceLock::new();
+
+fn run_setup_singleflight(key: String, run: impl FnOnce() -> Result<()>) -> Result<()> {
+    let flights = SETUP_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let (flight, is_leader) = {
+        let mut flights = flights
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match flights.get(&key) {
+            Some(flight) => (Arc::clone(flight), false),
+            None => {
+                let flight = Arc::new(SetupFlight::pending());
+                flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
+            }
+        }
+    };
+
+    if !is_leader {
+        return flight.wait();
+    }
+
+    let result = run();
+    let shared_result = match &result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(SharedSetupError::from_error(error)),
+    };
+    flight.complete(shared_result);
+    let mut flights = flights
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if flights
+        .get(&key)
+        .is_some_and(|current| Arc::ptr_eq(current, &flight))
+    {
+        flights.remove(&key);
+    }
+    result
+}
 
 pub fn sandbox_dir(codex_home: &Path) -> PathBuf {
     codex_home.join(".sandbox")
@@ -212,10 +324,16 @@ fn run_setup_refresh_inner(
     };
     let json = serde_json::to_vec(&payload)?;
     let b64 = BASE64_STANDARD.encode(json);
+    run_setup_singleflight(b64.clone(), || {
+        run_setup_refresh_payload(&b64, request.codex_home)
+    })
+}
+
+fn run_setup_refresh_payload(b64: &str, codex_home: &Path) -> Result<()> {
     let exe = find_setup_exe();
-    let sbx_dir = sandbox_dir(request.codex_home);
+    let sbx_dir = sandbox_dir(codex_home);
     let log_path = current_log_file_path(&sbx_dir);
-    let cleared_report = match clear_setup_error_report(request.codex_home) {
+    let cleared_report = match clear_setup_error_report(codex_home) {
         Ok(()) => true,
         Err(err) => {
             log_note(
@@ -227,8 +345,11 @@ fn run_setup_refresh_inner(
     };
     // Refresh should never request elevation; ensure verb isn't set and we don't trigger UAC.
     let mut cmd = Command::new(&exe);
-    cmd.arg(&b64).stdout(Stdio::null()).stderr(Stdio::null());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| request.codex_home.to_path_buf());
+    cmd.arg(b64)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| codex_home.to_path_buf());
     log_note(
         &format!(
             "setup refresh: spawning {} (cwd={}, payload_len={})",
@@ -254,12 +375,12 @@ fn run_setup_refresh_inner(
             Some(&sbx_dir),
         );
         return Err(report_helper_failure(
-            request.codex_home,
+            codex_home,
             cleared_report,
             status.code(),
         ));
     }
-    if let Err(err) = clear_setup_error_report(request.codex_home) {
+    if let Err(err) = clear_setup_error_report(codex_home) {
         log_note(
             &format!("setup refresh: failed to clear setup_error.json after success: {err}"),
             Some(&sbx_dir),
@@ -584,6 +705,10 @@ const PROXY_ENV_KEYS: &[&str] = &[
     "wss_proxy",
 ];
 const ALLOW_LOCAL_BINDING_ENV_KEY: &str = "CODEX_NETWORK_ALLOW_LOCAL_BINDING";
+// Internal wire format shared with network-proxy/src/proxy.rs. The value is a comma-separated,
+// sorted list of non-zero loopback proxy ports used only when computing the Windows offline
+// sandbox setup marker.
+const WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY: &str = "CODEX_WINDOWS_SANDBOX_PROXY_PORTS";
 
 pub(crate) fn offline_proxy_settings_from_env(
     env_map: &HashMap<String, String>,
@@ -622,6 +747,14 @@ pub(crate) fn proxy_ports_from_env(env_map: &HashMap<String, String>) -> Vec<u16
         {
             ports.insert(port);
         }
+    }
+    if let Some(value) = env_map.get(WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY) {
+        ports.extend(
+            value
+                .split(',')
+                .filter_map(|port| port.trim().parse::<u16>().ok())
+                .filter(|port| *port != 0),
+        );
     }
     ports.into_iter().collect()
 }
@@ -731,13 +864,6 @@ fn run_setup_exe(
     needs_elevation: bool,
     codex_home: &Path,
 ) -> Result<()> {
-    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
-    use windows_sys::Win32::System::Threading::INFINITE;
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
-    use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
-    use windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW;
-    use windows_sys::Win32::UI::Shell::ShellExecuteExW;
-    let exe = find_setup_exe();
     let payload_json = serde_json::to_string(payload).map_err(|err| {
         failure(
             SetupErrorCode::OrchestratorPayloadSerializeFailed,
@@ -745,6 +871,23 @@ fn run_setup_exe(
         )
     })?;
     let payload_b64 = BASE64_STANDARD.encode(payload_json.as_bytes());
+    run_setup_singleflight(payload_b64.clone(), || {
+        run_setup_exe_payload(&payload_b64, needs_elevation, codex_home)
+    })
+}
+
+fn run_setup_exe_payload(
+    payload_b64: &str,
+    needs_elevation: bool,
+    codex_home: &Path,
+) -> Result<()> {
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+    use windows_sys::Win32::System::Threading::INFINITE;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
+    use windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW;
+    use windows_sys::Win32::UI::Shell::ShellExecuteExW;
+    let exe = find_setup_exe();
     let cleared_report = match clear_setup_error_report(codex_home) {
         Ok(()) => true,
         Err(err) => {
@@ -760,7 +903,7 @@ fn run_setup_exe(
 
     if !needs_elevation {
         let status = Command::new(&exe)
-            .arg(&payload_b64)
+            .arg(payload_b64)
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -792,7 +935,7 @@ fn run_setup_exe(
     }
 
     let exe_w = crate::winutil::to_wide(&exe);
-    let params = quote_arg(&payload_b64);
+    let params = quote_arg(payload_b64);
     let params_w = crate::winutil::to_wide(params);
     let verb_w = crate::winutil::to_wide("runas");
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
@@ -903,7 +1046,11 @@ fn run_elevated_setup_inner(
     run_setup_exe(&payload, needs_elevation, request.codex_home)
 }
 
-pub fn run_elevated_provisioning_setup(codex_home: &Path, real_user: &str) -> Result<()> {
+pub fn run_elevated_provisioning_setup(
+    codex_home: &Path,
+    real_user: &str,
+    settings: crate::WindowsSandboxProvisioningSettings,
+) -> Result<()> {
     let sbx_dir = sandbox_dir(codex_home);
     std::fs::create_dir_all(&sbx_dir).map_err(|err| {
         failure(
@@ -932,8 +1079,8 @@ pub fn run_elevated_provisioning_setup(codex_home: &Path, real_user: &str) -> Re
         write_roots: Vec::new(),
         deny_read_paths: Vec::new(),
         deny_write_paths: Vec::new(),
-        proxy_ports: Vec::new(),
-        allow_local_binding: false,
+        proxy_ports: settings.proxy_ports,
+        allow_local_binding: settings.allow_local_binding,
         otel: codex_otel::global_statsig_metrics_settings(),
         real_user: real_user.to_string(),
         mode: SetupMode::ProvisionOnly,
@@ -1133,6 +1280,7 @@ fn filter_sensitive_write_roots(mut roots: Vec<PathBuf>, codex_home: &Path) -> V
 #[cfg(test)]
 mod tests {
     use super::WINDOWS_PLATFORM_DEFAULT_READ_ROOTS;
+    use super::WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY;
     use super::build_payload_roots;
     use super::find_setup_exe_for_current_exe;
     use super::gather_full_read_roots_for_permissions;
@@ -1159,6 +1307,13 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     fn canonical_windows_platform_default_roots() -> Vec<PathBuf> {
@@ -1178,6 +1333,73 @@ mod tests {
             extract_failure(&err).map(|failure| failure.code),
             Some(SetupErrorCode::OrchestratorHelperIncomplete)
         );
+    }
+
+    #[test]
+    fn identical_setup_requests_share_one_in_flight_run() {
+        let key = TempDir::new()
+            .expect("tempdir")
+            .path()
+            .display()
+            .to_string();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let leader = {
+            let key = key.clone();
+            let runs = Arc::clone(&runs);
+            thread::spawn(move || {
+                super::run_setup_singleflight(key, || {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).expect("signal leader started");
+                    release_rx.recv().expect("release leader");
+                    Ok(())
+                })
+            })
+        };
+        started_rx.recv().expect("leader started");
+
+        let waiter = {
+            let key = key.clone();
+            let runs = Arc::clone(&runs);
+            thread::spawn(move || {
+                super::run_setup_singleflight(key, || {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let attached = super::SETUP_FLIGHTS
+                .get()
+                .expect("setup flights initialized")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .is_some_and(|flight| Arc::strong_count(flight) >= 3);
+            if attached {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "waiter did not join setup flight"
+            );
+            thread::yield_now();
+        }
+
+        release_tx.send(()).expect("release leader");
+        leader
+            .join()
+            .expect("leader thread")
+            .expect("leader result");
+        waiter
+            .join()
+            .expect("waiter thread")
+            .expect("waiter result");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 
     fn permissions_for(
@@ -1394,8 +1616,12 @@ mod tests {
             "HTTPS_PROXY".to_string(),
             "https://example.com:9999".to_string(),
         );
+        env.insert(
+            WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY.to_string(),
+            "8080,43129,0,invalid, 43128,65536".to_string(),
+        );
 
-        assert_eq!(proxy_ports_from_env(&env), vec![1081, 8080]);
+        assert_eq!(proxy_ports_from_env(&env), vec![1081, 8080, 43128, 43129]);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 mod app_mcp_routing;
+mod command_migration;
 mod discoverable;
+mod http_client_selector;
 pub mod installed_marketplaces;
 pub mod loader;
 mod manager;
@@ -15,6 +17,8 @@ mod provider;
 pub mod remote;
 pub mod remote_bundle;
 pub mod remote_legacy;
+mod remote_plugin_id_resolver;
+mod script_attribution;
 pub mod startup_sync;
 pub mod store;
 #[cfg(test)]
@@ -37,12 +41,19 @@ pub type LoadedPlugin = codex_plugin::LoadedPlugin<codex_config::McpServerConfig
 pub type PluginLoadOutcome = codex_plugin::PluginLoadOutcome<codex_config::McpServerConfig>;
 
 pub use app_mcp_routing::apps_route_available;
+pub use command_migration::CommandDescriptionMode;
+pub use command_migration::CommandMigrationProfile;
+pub use command_migration::RewriteProfile as CommandRewriteProfile;
+pub use command_migration::count_missing_commands_with_profile;
+pub use command_migration::import_commands_with_profile;
+pub use command_migration::missing_command_names_with_profile;
 pub use discoverable::ToolSuggestDiscoverablePlugin;
 pub use discoverable::ToolSuggestPluginDiscoveryInput;
 pub use loader::PluginHookLoadOutcome;
 pub use manager::ConfiguredMarketplace;
 pub use manager::ConfiguredMarketplaceListOutcome;
 pub use manager::ConfiguredMarketplacePlugin;
+pub use manager::EffectivePluginsChange;
 pub use manager::PluginDetail;
 pub use manager::PluginDetailsUnavailableReason;
 pub use manager::PluginInstallError;
@@ -63,3 +74,5 @@ pub use provider::ExecutorPluginProviderError;
 pub use provider::ResolvedExecutorPlugin;
 pub use remote::RecommendedPlugin;
 pub use remote::RecommendedPluginsMode;
+pub use script_attribution::PluginCommandAttribution;
+pub use script_attribution::TrustedPluginRoots;

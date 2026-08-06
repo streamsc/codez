@@ -1,10 +1,9 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 1128
 expression: rendered
 ---
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ✨ Update available! 0.144.4 -> 9.9.9                                                                      │
+│ ✨ Update available! 0.146.1 -> 9.9.9                                                                      │
 │ Run sh -c 'curl -fsSL https://github.com/streamsc/codez/releases/latest/download/install-codez.sh |        │
 │ CODEX_NON_INTERACTIVE=1 sh' to update.                                                                     │
 │                                                                                                            │

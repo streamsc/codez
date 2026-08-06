@@ -19,6 +19,7 @@ use codex_client::RequestBody;
 use codex_client::Response;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
@@ -27,6 +28,7 @@ use http::HeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
 use pretty_assertions::assert_eq;
+use serde_json::value::RawValue;
 
 fn assert_path_ends_with(requests: &[Request], suffix: &str) {
     assert_eq!(requests.len(), 1);
@@ -35,6 +37,10 @@ fn assert_path_ends_with(requests: &[Request], suffix: &str) {
         url.ends_with(suffix),
         "expected url to end with {suffix}, got {url}"
     );
+}
+
+fn empty_tools() -> Arc<RawValue> {
+    Arc::from(RawValue::from_string("[]".to_string()).expect("valid tool JSON"))
 }
 
 fn request_body_bytes(request: &Request) -> &[u8] {
@@ -309,13 +315,13 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
-            id: Some("msg_1".into()),
+            id: Some(ResponseItemId::with_suffix("msg", "1")),
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         }],
-        tools: Some(Vec::new()),
+        tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,
@@ -402,7 +408,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: Vec::new(),
-        tools: Some(Vec::new()),
+        tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,
@@ -516,13 +522,13 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
-            id: Some("msg_1".into()),
+            id: Some(ResponseItemId::with_suffix("msg", "1")),
             role: "user".into(),
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         }],
-        tools: Some(Vec::new()),
+        tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
         reasoning: None,

@@ -83,6 +83,13 @@ fn validate_api_base_url(raw: &str) -> Result<String> {
         anyhow::bail!("--api-base-url must not be empty");
     }
 
+    let authority = value
+        .split_once("://")
+        .map(|(_, remainder)| remainder.split(['/', '?', '#']).next().unwrap_or_default());
+    if authority.is_none_or(str::is_empty) {
+        anyhow::bail!("--api-base-url must include a host");
+    }
+
     let url = Url::parse(value).map_err(|error| match error {
         url::ParseError::EmptyHost => anyhow::anyhow!("--api-base-url must include a host"),
         error => anyhow::anyhow!("--api-base-url must be a valid URL: {error}"),
