@@ -1,6 +1,6 @@
 # Codez
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
 Codez is a minimal, upstream-compatible fork of the [OpenAI Codex CLI](https://github.com/openai/codex). It keeps Codex internals and local data formats intact while exposing the product as `codez`.
 
