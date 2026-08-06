@@ -11,13 +11,11 @@ outputs:
 runs:
   using: composite
   steps:
-    # setup-ci expects either this step or the Unix fallback below to define
-    # CI_BUILD_ROOT. Windows puts it on a Dev Drive because Cargo and Bazel
-    # spend significant time reading and writing build/cache trees.
-    - name: Configure Dev Drive (Windows)
+    # GitHub-hosted Windows 2022 runners expose D: as their workspace drive.
+    - name: Configure CI build root (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
-      run: ./.github/scripts/setup-dev-drive.ps1
+      run: '"CI_BUILD_ROOT=D:" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
 
     - name: Configure CI build root (Unix)
       if: runner.os != 'Windows'
