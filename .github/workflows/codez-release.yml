@@ -58,6 +58,10 @@ jobs:
             is_linux: false
             # The hosted macOS ARM64 sccache daemon is unstable for this release build.
             use_sccache: false
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            is_linux: false
+            use_sccache: false
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             is_linux: true
@@ -81,7 +85,7 @@ jobs:
               [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]] \
                 || { echo "Expected an ARM64 runner for ${TARGET}" >&2; exit 1; }
               ;;
-            x86_64-unknown-linux-musl)
+            x86_64-apple-darwin | x86_64-unknown-linux-musl)
               [[ "$(uname -m)" == "x86_64" ]] \
                 || { echo "Expected an x86_64 runner for ${TARGET}" >&2; exit 1; }
               ;;
@@ -265,7 +269,7 @@ jobs:
             if [[ "${USE_SCCACHE}" == "true" ]]; then
               sccache --show-stats || true
             else
-              echo "sccache disabled for macOS ARM64 hosted runner"
+              echo "sccache disabled for macOS hosted runner"
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -296,6 +300,7 @@ jobs:
           expected=(
             codez-package-aarch64-apple-darwin.tar.gz
             codez-package-aarch64-unknown-linux-musl.tar.gz
+            codez-package-x86_64-apple-darwin.tar.gz
             codez-package-x86_64-unknown-linux-musl.tar.gz
           )
           for archive in "${expected[@]}"; do
@@ -329,6 +334,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             dist/codez-package-aarch64-apple-darwin.tar.gz \
             dist/codez-package-aarch64-unknown-linux-musl.tar.gz \
+            dist/codez-package-x86_64-apple-darwin.tar.gz \
             dist/codez-package-x86_64-unknown-linux-musl.tar.gz \
             dist/codez-package_SHA256SUMS \
             dist/install-codez.sh \

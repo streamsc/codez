@@ -20,7 +20,7 @@ usage() {
   cat <<'EOF'
 Usage: install-codez.sh [--release VERSION]
 
-Installs the Codez release for macOS Apple Silicon or Linux x86_64/ARM64.
+Installs the Codez release for macOS x86_64/ARM64 or Linux x86_64/ARM64.
 
 Environment:
   CODEX_RELEASE      Release to install: latest, codez-vX.Y.Z-rN, or X.Y.Z-rN.
@@ -130,6 +130,9 @@ case "$system:$machine" in
   Darwin:arm64 | Darwin:aarch64)
     TARGET="aarch64-apple-darwin"
     ;;
+  Darwin:x86_64)
+    TARGET="x86_64-apple-darwin"
+    ;;
   Linux:x86_64 | Linux:amd64)
     TARGET="x86_64-unknown-linux-musl"
     ;;
@@ -137,7 +140,7 @@ case "$system:$machine" in
     TARGET="aarch64-unknown-linux-musl"
     ;;
   Darwin:*)
-    echo "Codez releases support Apple Silicon macOS only; detected $machine." >&2
+    echo "Codez releases support x86_64 and ARM64 macOS only; detected $machine." >&2
     exit 1
     ;;
   Linux:*)

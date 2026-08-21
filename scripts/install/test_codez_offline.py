@@ -19,6 +19,7 @@ VERSION = "0.144.4-r1"
 UPSTREAM_VERSION = "0.144.4"
 TARGETS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
+    ("Darwin", "x86_64", "x86_64-apple-darwin", False),
     ("Linux", "x86_64", "x86_64-unknown-linux-musl", True),
     ("Linux", "aarch64", "aarch64-unknown-linux-musl", True),
 )
@@ -83,7 +84,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                 bundle,
                 root / "codex-home",
                 root / "bin",
-                "Linux",
+                "Darwin",
                 "x86_64",
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -95,14 +96,14 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             with tarfile.open(bundle, "r:gz") as archive:
                 archive.extractall(broken)
             bundle_dir = next(broken.iterdir())
-            archive_path = bundle_dir / "codez-package-x86_64-unknown-linux-musl.tar.gz"
+            archive_path = bundle_dir / "codez-package-x86_64-apple-darwin.tar.gz"
             archive_path.write_bytes(archive_path.read_bytes() + b"corruption")
 
             failed = self._run_installer(
                 bundle_dir,
                 root / "codex-home",
                 root / "bin",
-                "Linux",
+                "Darwin",
                 "x86_64",
             )
             self.assertNotEqual(failed.returncode, 0)
@@ -150,17 +151,17 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (bundle_dir / "codez-package-x86_64-unknown-linux-musl.tar.gz").unlink()
+            (bundle_dir / "codez-package-x86_64-apple-darwin.tar.gz").unlink()
             failed_asset = self._run_installer(
                 bundle_dir,
                 root / "asset-home",
                 root / "asset-bin",
-                "Linux",
+                "Darwin",
                 "x86_64",
             )
             self.assertNotEqual(failed_asset.returncode, 0)
             self.assertIn(
-                "Bundle is missing codez-package-x86_64-unknown-linux-musl.tar.gz",
+                "Bundle is missing codez-package-x86_64-apple-darwin.tar.gz",
                 failed_asset.stderr,
             )
 

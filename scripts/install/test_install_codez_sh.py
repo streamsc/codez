@@ -16,6 +16,7 @@ TAG = "codez-v0.144.4-r1"
 CHECKSUMS = "codez-package_SHA256SUMS"
 SUPPORTED_PLATFORMS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
+    ("Darwin", "x86_64", "x86_64-apple-darwin", False),
     ("Linux", "x86_64", "x86_64-unknown-linux-musl", True),
     ("Linux", "aarch64", "aarch64-unknown-linux-musl", True),
 )
@@ -81,7 +82,7 @@ class InstallCodezShTest(unittest.TestCase):
 
     def test_rejects_unsupported_platforms(self) -> None:
         unsupported = (
-            ("Darwin", "x86_64", "Apple Silicon macOS only"),
+            ("Darwin", "powerpc", "x86_64 and ARM64 macOS only"),
             ("Linux", "riscv64", "x86_64 and ARM64 Linux only"),
             ("FreeBSD", "x86_64", "macOS and Linux only"),
         )

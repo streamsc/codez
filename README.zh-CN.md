@@ -4,12 +4,12 @@
 
 Codez 基于开源项目 [OpenAI Codex CLI](https://github.com/openai/codex)，并与上游保持兼容。它保留 Codex 的内部实现和本地数据格式，同时以 `codez` 的名称对外提供产品。
 
-Codez 跟踪上游 Codex 版本，并为 macOS Apple Silicon 以及 Linux x86_64/ARM64 发布未签名的软件包。
+Codez 跟踪上游 Codex 版本，并为 macOS 和 Linux x86_64/ARM64 发布未签名的软件包。
 
 ## 主要特点
 
 - 与上游 Codex 保持兼容，共享配置、认证信息、本地会话和其他数据格式。
-- 支持 macOS Apple Silicon、Linux x86_64 和 Linux ARM64。
+- 支持 macOS x86_64/ARM64 和 Linux x86_64/ARM64。
 - 提供多平台离线安装包，为无网络、受限网络或隔离环境提供安装支持。
 
 ## 安装
@@ -22,6 +22,7 @@ codez
 安装程序会自动检测当前平台，并下载以下发布包之一：
 
 - `codez-package-aarch64-apple-darwin.tar.gz`
+- `codez-package-x86_64-apple-darwin.tar.gz`
 - `codez-package-x86_64-unknown-linux-musl.tar.gz`
 - `codez-package-aarch64-unknown-linux-musl.tar.gz`
 
@@ -47,7 +48,7 @@ tar -xzf codez-offline-v0.146.1-r1.tar.gz
   --bundle ./codez-offline-v0.146.1-r1
 ```
 
-离线安装程序会选择对应的 macOS Apple Silicon、Linux x86_64 或 Linux ARM64 软件包，
+离线安装程序会选择对应的 macOS 或 Linux x86_64/ARM64 软件包，
 根据包内的 SHA-256 记录进行校验，并在不连接 GitHub 的情况下完成安装。它支持与在线安装程序相同的
 `CODEX_HOME` 和 `CODEX_INSTALL_DIR` 环境变量。
 
@@ -111,10 +112,10 @@ cargo build --bin codex --bin codex-code-mode-host
 ```shell
 CODEZ_VERSION=0.146.1-r1 python3 scripts/build_codex_package.py \
   --variant codez \
-  --target aarch64-apple-darwin \
+  --target x86_64-apple-darwin \
   --cargo-profile release \
   --package-dir dist/codez-package \
-  --archive-output dist/codez-package-aarch64-apple-darwin.tar.gz
+  --archive-output dist/codez-package-x86_64-apple-darwin.tar.gz
 ```
 
 Linux 版本使用 musl，并包含内置的 `bwrap`。请先构建 `bwrap`，确定其最终二进制内容，再将摘要传给 Codez 构建流程：
@@ -135,7 +136,7 @@ CODEZ_VERSION=0.146.1-r1 python3 scripts/build_codex_package.py \
   --archive-output "dist/codez-package-$TARGET.tar.gz"
 ```
 
-标签格式为 `codez-v<上游版本>-r<N>`，例如 `codez-v0.146.1-r1`。发布工作流会构建三个平台的软件包，
+标签格式为 `codez-v<上游版本>-r<N>`，例如 `codez-v0.146.1-r1`。发布工作流会构建四个平台的软件包，
 发布统一的校验和清单，并在不同运行之间缓存 Cargo 依赖和编译器输出。定时上游同步工作流会检测稳定的
 `rust-vX.Y.Z` 标签并创建供审核的 PR，但不会自动合并。
 

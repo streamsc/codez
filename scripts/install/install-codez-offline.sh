@@ -205,9 +205,10 @@ detect_target() {
   machine="$(uname -m)"
   case "$system:$machine" in
     Darwin:arm64|Darwin:aarch64) TARGET=aarch64-apple-darwin ;;
+    Darwin:x86_64) TARGET=x86_64-apple-darwin ;;
     Linux:x86_64|Linux:amd64) TARGET=x86_64-unknown-linux-musl ;;
     Linux:arm64|Linux:aarch64) TARGET=aarch64-unknown-linux-musl ;;
-    Darwin:*) fail "Codez offline releases support Apple Silicon macOS only; detected $machine." ;;
+    Darwin:*) fail "Codez offline releases support x86_64 and ARM64 macOS only; detected $machine." ;;
     Linux:*) fail "Codez offline releases support x86_64 and ARM64 Linux only; detected $machine." ;;
     *) fail "Codez offline releases support macOS and Linux only; detected $system/$machine." ;;
   esac
