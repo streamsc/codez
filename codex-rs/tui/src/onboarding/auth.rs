@@ -437,12 +437,12 @@ impl AuthModeWidget {
 
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line> = if self.bedrock_setup_enabled {
-            vec!["  Choose how you want to use Codex.".into(), "".into()]
+            vec!["  Choose how you want to use Codez.".into(), "".into()]
         } else {
             vec![
                 Line::from(vec![
                     "  ".into(),
-                    "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
+                    "Sign in with ChatGPT to use Codez as part of your paid plan".into(),
                 ]),
                 Line::from(vec![
                     "  ".into(),
@@ -630,10 +630,10 @@ impl AuthModeWidget {
             "".into(),
             "  Before you start:".into(),
             "".into(),
-            "  Decide how much autonomy you want to grant Codex".into(),
+            "  Decide how much autonomy you want to grant Codez".into(),
             docs_line,
             "".into(),
-            "  Codex can make mistakes".into(),
+            "  Codez can make mistakes".into(),
             HyperlinkLine::new(
                 "  Review the code it writes and commands it runs"
                     .dim()
@@ -672,7 +672,7 @@ impl AuthModeWidget {
         let lines = vec![
             "✓ API key configured".fg(Color::Green).into(),
             "".into(),
-            "  Codex will use usage-based billing with your API key.".into(),
+            "  Codez will use usage-based billing with your API key.".into(),
         ];
 
         Paragraph::new(lines)
@@ -1233,8 +1233,8 @@ mod tests {
         while rows.last().is_some_and(String::is_empty) {
             rows.pop();
         }
-        insta::assert_snapshot!(rows.join("\n"), @r###"
-          Choose how you want to use Codex.
+        insta::assert_snapshot!(rows.join("\n"), @"
+          Choose how you want to use Codez.
 
         > 1. Sign in with ChatGPT
              Usage included with Plus, Pro, Business, and Enterprise plans
@@ -1249,7 +1249,7 @@ mod tests {
              Connect using your AWS credentials
 
           Press enter to continue
-        "###);
+        ");
 
         widget.auth_config.forced_login_method = Some(ForcedLoginMethod::Chatgpt);
         assert_eq!(
@@ -1434,22 +1434,22 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        insta::assert_snapshot!(visible, @r###"
+        insta::assert_snapshot!(visible, @"
         ✓ Signed in with your ChatGPT account
 
           Before you start:
 
-          Decide how much autonomy you want to grant Codex
+          Decide how much autonomy you want to grant Codez
           For more details see the Codex docs
 
-          Codex can make mistakes
+          Codez can make mistakes
           Review the code it writes and commands it runs
 
           Powered by your ChatGPT account
           Uses your plan's rate limits and training data preferences
 
           Press enter to continue
-        "###);
+        ");
     }
 
     #[test]

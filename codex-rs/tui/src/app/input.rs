@@ -267,17 +267,17 @@ impl App {
                     items: [
                         (
                             "Cancel task",
-                            "Stop the current task and stay in Codex",
+                            "Stop the current task and stay in Codez",
                             RunningTaskExitAction::CancelTask,
                         ),
                         (
                             "Run in background",
-                            "Exit Codex and leave the task running",
+                            "Exit Codez and leave the task running",
                             RunningTaskExitAction::RunInBackground,
                         ),
                         (
                             "Exit",
-                            "Stop the current task and exit Codex",
+                            "Stop the current task and exit Codez",
                             RunningTaskExitAction::Exit,
                         ),
                     ]
