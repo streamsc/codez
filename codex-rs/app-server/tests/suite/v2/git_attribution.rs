@@ -14,6 +14,7 @@ use app_test_support::write_chatgpt_auth;
 use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackParams;
@@ -25,14 +26,15 @@ use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::Duration;
 use tokio::time::timeout;
 use wiremock::Mock;
@@ -48,7 +50,7 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(not(any(target_os = "macos", windows)))]
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMIT_ATTRIBUTION: &str = "Co-authored-by: Codex <noreply@openai.com>";
-const PR_ATTRIBUTION: &str = "Generated with Codex.";
+const PR_ATTRIBUTION: &str = "Generated with [Codex](https://openai.com/codex/).";
 const ATTRIBUTION_DISABLED: &str = "attribution is disabled for the current workspace";
 const LEGACY_COMMIT_ATTRIBUTION_INSTRUCTIONS: &str = "\
 When you write or edit a git commit message, ensure the message ends with this trailer exactly once:
@@ -58,6 +60,12 @@ Rules:
 - Keep existing trailers and append this trailer at the end if missing.
 - Do not duplicate this trailer if it already exists.
 - Keep one blank line between the commit body and trailer block.";
+
+#[derive(Clone, Copy)]
+enum LegacyAttribution {
+    CommitOnly,
+    UnlinkedPullRequest,
+}
 
 #[tokio::test]
 async fn git_attribution_follows_authenticated_workspace_policy() -> Result<()> {
@@ -140,6 +148,7 @@ async fn git_attribution_follows_authenticated_workspace_policy() -> Result<()> 
                 "chatgpt_base_url".to_string(),
                 json!(format!("{}/backend-api", settings_server.uri())),
             )])),
+            history_mode: Some(ThreadHistoryMode::Legacy),
             ..Default::default()
         })
         .await?;
@@ -205,8 +214,12 @@ async fn git_attribution_follows_authenticated_workspace_policy() -> Result<()> 
     Ok(())
 }
 
+#[test_case(LegacyAttribution::CommitOnly; "commit_only")]
+#[test_case(LegacyAttribution::UnlinkedPullRequest; "unlinked_pull_request")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cold_resume_replaces_legacy_attribution_without_duplication() -> Result<()> {
+async fn cold_resume_replaces_legacy_attribution_without_duplication(
+    legacy_attribution: LegacyAttribution,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -275,7 +288,7 @@ async fn cold_resume_replaces_legacy_attribution_without_duplication() -> Result
         status.success(),
         "initial app-server did not exit successfully"
     );
-    replace_attribution_fragment_with_legacy(&rollout_path)?;
+    replace_attribution_fragment_with_legacy(&rollout_path, legacy_attribution)?;
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -310,7 +323,10 @@ async fn cold_resume_replaces_legacy_attribution_without_duplication() -> Result
     Ok(())
 }
 
-fn replace_attribution_fragment_with_legacy(rollout_path: &Path) -> Result<()> {
+fn replace_attribution_fragment_with_legacy(
+    rollout_path: &Path,
+    legacy_attribution: LegacyAttribution,
+) -> Result<()> {
     let rollout = std::fs::read_to_string(rollout_path)?;
     let mut replaced = false;
     let mut removed_saved_attribution = false;
@@ -319,22 +335,28 @@ fn replace_attribution_fragment_with_legacy(rollout_path: &Path) -> Result<()> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let mut line = serde_json::from_str::<RolloutLine>(line)?;
-            if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) =
-                &mut line.item
+            if let RolloutItem::ResponseItem(response_item) = &mut line.item
+                && let ResponseItem::Message { role, content, .. } = &mut response_item.item
                 && role == "developer"
             {
                 for item in content {
                     if let ContentItem::InputText { text } = item
                         && text.contains("<git_attribution>")
                     {
-                        *text = LEGACY_COMMIT_ATTRIBUTION_INSTRUCTIONS.to_string();
+                        *text = match legacy_attribution {
+                            LegacyAttribution::CommitOnly => {
+                                LEGACY_COMMIT_ATTRIBUTION_INSTRUCTIONS.to_string()
+                            }
+                            LegacyAttribution::UnlinkedPullRequest => {
+                                text.replace(PR_ATTRIBUTION, "Generated with Codex.")
+                            }
+                        };
                         replaced = true;
                     }
                 }
             }
             if let RolloutItem::WorldState(world_state) = &mut line.item
-                && let Some(state) = world_state.state.as_object_mut()
-                && state.remove("git_attribution").is_some()
+                && world_state.state.remove("git_attribution").is_some()
             {
                 removed_saved_attribution = true;
             }

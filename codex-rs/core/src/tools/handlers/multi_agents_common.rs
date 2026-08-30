@@ -36,7 +36,7 @@ pub(crate) fn model_supports_multi_agent_backend(
     multi_agent_version: MultiAgentVersion,
 ) -> bool {
     multi_agent_version != MultiAgentVersion::V2
-        || model.multi_agent_version == Some(multi_agent_version)
+        || model.multi_agent_version != Some(MultiAgentVersion::Disabled)
 }
 
 pub(crate) fn function_arguments(payload: ToolPayload) -> Result<String, FunctionCallError> {
@@ -169,16 +169,17 @@ pub(crate) fn parse_collab_input(
 /// Builds the base config snapshot for a newly spawned sub-agent.
 ///
 /// The returned config starts from the parent's effective config and then refreshes the
-/// runtime-owned fields carried on `turn`, including model selection, reasoning settings,
-/// approval policy, sandbox, and cwd. Role-specific overrides are layered after this step;
-/// skipping this helper and cloning stale config state directly can send the child agent out with
-/// the wrong provider or runtime policy.
+/// runtime-owned fields carried by the turn, including model selection, reasoning settings,
+/// approval policy, sandbox, and cwd. Role-specific overrides are layered
+/// after this step; skipping this helper and cloning stale config state directly can send the child
+/// agent out with the wrong provider or runtime policy.
 pub(crate) fn build_agent_spawn_config(
     base_instructions: &BaseInstructions,
     turn: &TurnContext,
 ) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
     config.base_instructions = Some(base_instructions.text.clone());
+    config.base_instructions_provenance = base_instructions.provenance.clone();
     Ok(config)
 }
 
@@ -186,20 +187,30 @@ pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, Fu
     let mut config = build_agent_shared_config(turn)?;
     // For resume, keep base instructions sourced from rollout/session metadata.
     config.base_instructions = None;
+    config.base_instructions_provenance = None;
     Ok(config)
 }
 
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
-    config.model = Some(turn.model_info.slug.clone());
+    config.model = Some(turn.model_info().slug.clone());
     config.model_provider = turn.provider.info().clone();
     config.model_reasoning_effort = turn
-        .reasoning_effort
-        .clone()
-        .or_else(|| turn.model_info.default_reasoning_level.clone());
-    config.model_reasoning_summary = Some(turn.reasoning_summary);
+        .reasoning_effort()
+        .or(turn.model_info().default_reasoning_level.as_ref())
+        .cloned();
+    config.model_reasoning_summary = Some(turn.reasoning_summary());
     config.developer_instructions = turn.developer_instructions.clone();
+    if turn.multi_agent_version == MultiAgentVersion::V2
+        && let Some(developer_instructions) = turn
+            .config
+            .multi_agent_v2
+            .subagent_developer_instructions
+            .clone()
+    {
+        config.developer_instructions = Some(developer_instructions);
+    }
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     Ok(config)
@@ -218,8 +229,8 @@ pub(crate) fn reject_full_fork_agent_type_override(
 
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
 ///
-/// These values are chosen by the live turn rather than persisted config, so leaving them stale
-/// can make a child agent disagree with its parent about approval policy, cwd, or sandboxing.
+/// These values are chosen by the live turn rather than persisted config, so leaving them stale can
+/// make a child agent disagree with its parent about approval policy, cwd, or sandboxing.
 pub(crate) fn apply_spawn_agent_runtime_overrides(
     config: &mut Config,
     turn: &TurnContext,
@@ -227,7 +238,7 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     config
         .permissions
         .approval_policy
-        .set(turn.approval_policy.value())
+        .set(turn.approval_policy())
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("approval_policy is invalid: {err}"))
         })?;
@@ -237,7 +248,12 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     config.cwd = turn_cwd;
     config
         .permissions
-        .set_permission_profile(turn.permission_profile())
+        .set_permission_profile_from_session_snapshot(
+            turn.config
+                .permissions
+                .permission_profile_state()
+                .snapshot(),
+        )
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
         })?;
@@ -292,8 +308,8 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
 
     if let Some(reasoning_effort) = requested_reasoning_effort {
         validate_spawn_agent_reasoning_effort(
-            &turn.model_info.slug,
-            &turn.model_info.supported_reasoning_levels,
+            &turn.model_info().slug,
+            &turn.model_info().supported_reasoning_levels,
             &reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);

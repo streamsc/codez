@@ -67,15 +67,18 @@ use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AgentMessageDelivery;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadItem;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
@@ -108,8 +111,16 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
     matches!(
         notification,
         ServerNotification::TurnCompleted(_)
+            | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
+            | ServerNotification::ItemCompleted(ItemCompletedNotification {
+                item: ThreadItem::AgentMessage {
+                    delivery: Some(AgentMessageDelivery::Async),
+                    ..
+                },
+                ..
+            })
     )
 }
 
@@ -160,9 +171,9 @@ pub struct InProcessStartArgs {
 #[derive(Debug, Clone)]
 pub enum InProcessServerEvent {
     /// Server request that requires client response/rejection.
-    ServerRequest(ServerRequest),
+    ServerRequest(Box<ServerRequest>),
     /// App-server notification directed to the embedded client.
-    ServerNotification(ServerNotification),
+    ServerNotification(Box<ServerNotification>),
     /// Indicates one or more events were dropped due to backpressure.
     Lagged { skipped: usize },
 }
@@ -403,16 +414,18 @@ async fn run_outbound_router(
 }
 
 async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    args.config.auth_config().validate()?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
+    let auth_manager =
+        AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
+            .await
+            .map_err(IoError::other)?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
     let runtime_handle = tokio::spawn(async move {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
-        let auth_manager =
-            AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
-                .await;
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
         let analytics_events_flush_client = analytics_events_client.clone();
@@ -641,7 +654,10 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                     match outgoing_message {
                         OutgoingMessage::Response(response) => {
                             if let Some(response_tx) = pending_request_responses.remove(&response.id) {
-                                let _ = response_tx.send(Ok(response.result));
+                                let result = serde_json::to_value(response.result).map_err(|err| {
+                                    internal_error(format!("failed to serialize response: {err}"))
+                                });
+                                let _ = response_tx.send(result);
                             } else {
                                 warn!(
                                     request_id = ?response.id,
@@ -663,7 +679,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                             // Send directly to avoid cloning; on failure the
                             // original value is returned inside the error.
                             if let Err(send_error) = event_tx
-                                .try_send(InProcessServerEvent::ServerRequest(request))
+                                .try_send(InProcessServerEvent::ServerRequest(Box::new(request)))
                             {
                                 let (error, inner) = match send_error {
                                     mpsc::error::TrySendError::Full(inner) => (
@@ -695,18 +711,23 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                             let notification = envelope.notification;
                             if server_notification_requires_delivery(&notification) {
                                 if event_tx
-                                    .send(InProcessServerEvent::ServerNotification(notification))
+                                    .send(InProcessServerEvent::ServerNotification(Box::new(
+                                        notification,
+                                    )))
                                     .await
                                     .is_err()
                                 {
                                     break;
                                 }
                             } else if let Err(send_error) =
-                                event_tx.try_send(InProcessServerEvent::ServerNotification(notification))
+                                event_tx.try_send(InProcessServerEvent::ServerNotification(
+                                    Box::new(notification),
+                                ))
                             {
                                 match send_error {
                                     mpsc::error::TrySendError::Full(_) => {
                                         warn!("dropping in-process server notification (queue full)");
+                                        continue;
                                     }
                                     mpsc::error::TrySendError::Closed(_) => {
                                         break;
@@ -771,6 +792,7 @@ mod tests {
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
+    use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::Turn;
@@ -988,12 +1010,31 @@ mod tests {
             })
         ));
         assert!(server_notification_requires_delivery(
+            &ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
+                thread_id: "thread-1".to_string(),
+            })
+        ));
+        assert!(server_notification_requires_delivery(
             &ServerNotification::ExternalAgentConfigImportCompleted(
                 ExternalAgentConfigImportCompletedNotification {
                     import_id: "import".to_string(),
                     item_type_results: Vec::new(),
                 },
             )
+        ));
+        assert!(server_notification_requires_delivery(
+            &ServerNotification::ItemCompleted(ItemCompletedNotification {
+                item: ThreadItem::AgentMessage {
+                    id: "item-1".to_string(),
+                    text: "Still working".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                    delivery: Some(AgentMessageDelivery::Async),
+                },
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                completed_at_ms: 0,
+            })
         ));
     }
 }

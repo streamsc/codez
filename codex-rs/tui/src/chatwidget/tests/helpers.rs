@@ -44,6 +44,7 @@ pub(super) fn normalize_snapshot_paths(text: impl Into<String>) -> String {
             text = text.replace(&platform_path, unix_path);
         }
     }
+    text = text.replace("/tmp/project\\", "/tmp/project/");
 
     let platform_test_cwd = test_path_display("/tmp/project");
     if platform_test_cwd == "/tmp/project" {
@@ -206,12 +207,6 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     let mut widget = ChatWidget::new_with_op_target(common, super::CodexOpTarget::Direct(op_tx));
     widget.transcript.active_cell = None;
     widget.transcript.active_cell_revision = 0;
-    widget.normal_placeholder_text = "Ask Codez to do anything".to_string();
-    widget.side_placeholder_text =
-        "Check recently modified functions for compatibility".to_string();
-    widget
-        .bottom_pane
-        .set_placeholder_text(widget.normal_placeholder_text.clone());
     widget.set_model(&resolved_model);
     (widget, rx, op_rx)
 }
@@ -283,13 +278,11 @@ fn test_model_info(slug: &str, priority: i32, supports_fast_mode: bool) -> Model
         "default_service_tier": null,
         "availability_nux": null,
         "upgrade": null,
-        "base_instructions": "base instructions",
         "default_reasoning_summary": "none",
         "support_verbosity": false,
         "default_verbosity": null,
         "apply_patch_tool_type": null,
         "truncation_policy": {"mode": "bytes", "limit": 10_000},
-        "supports_parallel_tool_calls": false,
         "supports_image_detail_original": false,
         "context_window": 272_000,
         "experimental_supported_tools": [],
@@ -422,6 +415,7 @@ pub(super) fn handle_error(
     chat.handle_server_notification(
         ServerNotification::Error(ErrorNotification {
             error: AppServerTurnError {
+                misalignment: None,
                 message: message.into(),
                 codex_error_info,
                 additional_details: None,
@@ -455,6 +449,7 @@ pub(super) fn handle_stream_error_with_replay(
     chat.handle_server_notification(
         ServerNotification::Error(ErrorNotification {
             error: AppServerTurnError {
+                misalignment: None,
                 message: message.into(),
                 codex_error_info: None,
                 additional_details,
@@ -719,7 +714,10 @@ pub(super) fn handle_image_generation_end(
                 status: status.into(),
                 revised_prompt,
                 result: String::new(),
+                transparent_background: None,
+                failure: None,
                 saved_path,
+                imagegen_request_id: None,
             }),
         }),
         /*replay_kind*/ None,
@@ -772,6 +770,7 @@ pub(super) fn replay_agent_message(
             text: text.into(),
             phase: Some(MessagePhase::FinalAnswer),
             memory_citation: None,
+            delivery: None,
         },
         "turn-1".to_string(),
         replay_kind,
@@ -924,6 +923,7 @@ pub(super) fn complete_assistant_message(
                 text: text.to_string(),
                 phase,
                 memory_citation: None,
+                delivery: None,
             },
         }),
         /*replay_kind*/ None,
@@ -1173,7 +1173,7 @@ pub(super) async fn assert_shift_left_edits_most_recent_queued_message_for_termi
 ) {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.queued_message_edit_hint_binding =
-        Some(queued_message_edit_binding_for_terminal(terminal_info));
+        Some(queued_message_edit_binding_for_terminal(terminal_info).into());
     chat.bottom_pane
         .set_queued_message_edit_binding(chat.queued_message_edit_hint_binding);
 
@@ -1354,12 +1354,15 @@ pub(super) fn plugins_test_summary(
             path: plugins_test_absolute_path(&format!("plugins/{name}")),
         },
         installed,
+        installed_at: None,
         enabled,
         install_policy,
         install_policy_source: None,
         must_show_installation_interstitial: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
+        disabled_reason: None,
+        eligible_plan_types: None,
         interface: Some(plugins_test_interface(
             display_name,
             description,
@@ -1385,12 +1388,15 @@ pub(super) fn plugins_test_remote_summary(
         share_context: None,
         source: PluginSource::Remote,
         installed,
+        installed_at: None,
         enabled: true,
         install_policy: PluginInstallPolicy::Available,
         install_policy_source: None,
         must_show_installation_interstitial: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
+        disabled_reason: None,
+        eligible_plan_types: None,
         interface: Some(plugins_test_interface(
             display_name,
             description,
@@ -1667,6 +1673,16 @@ pub(super) async fn assert_hook_events_snapshot(
         "hook start should render in the live hook cell"
     );
 
+    let mut entries = vec![codex_app_server_protocol::HookOutputEntry {
+        kind: codex_app_server_protocol::HookOutputEntryKind::Warning,
+        text: "Heads up from the hook".to_string(),
+    }];
+    if event_name != codex_app_server_protocol::HookEventName::Interrupt {
+        entries.push(codex_app_server_protocol::HookOutputEntry {
+            kind: codex_app_server_protocol::HookOutputEntryKind::Context,
+            text: "Remember the startup checklist.".to_string(),
+        });
+    }
     handle_hook_completed(
         &mut chat,
         hook_run(
@@ -1674,16 +1690,7 @@ pub(super) async fn assert_hook_events_snapshot(
             event_name,
             codex_app_server_protocol::HookRunStatus::Completed,
             status_message,
-            vec![
-                codex_app_server_protocol::HookOutputEntry {
-                    kind: codex_app_server_protocol::HookOutputEntryKind::Warning,
-                    text: "Heads up from the hook".to_string(),
-                },
-                codex_app_server_protocol::HookOutputEntry {
-                    kind: codex_app_server_protocol::HookOutputEntryKind::Context,
-                    text: "Remember the startup checklist.".to_string(),
-                },
-            ],
+            entries,
         ),
     );
 
@@ -1708,5 +1715,6 @@ fn hook_event_label(event_name: codex_app_server_protocol::HookEventName) -> &'s
         codex_app_server_protocol::HookEventName::SubagentStart => "SubagentStart",
         codex_app_server_protocol::HookEventName::SubagentStop => "SubagentStop",
         codex_app_server_protocol::HookEventName::Stop => "Stop",
+        codex_app_server_protocol::HookEventName::Interrupt => "Interrupt",
     }
 }

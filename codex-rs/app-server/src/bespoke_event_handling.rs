@@ -4,7 +4,7 @@ use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
-use crate::request_processors::thread_settings_from_core_snapshot;
+use crate::request_processors::thread_settings_from_config_snapshot;
 use crate::server_request_error::is_turn_transition_server_request_error;
 use crate::thread_state::ThreadState;
 use crate::thread_state::TurnSummary;
@@ -16,6 +16,7 @@ use codex_app_server_protocol::AdditionalPermissionProfile as V2AdditionalPermis
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CommandAction as V2ParsedCommand;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
+use codex_app_server_protocol::CommandExecutionPresentation;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionSource;
@@ -52,6 +53,7 @@ use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
+use codex_app_server_protocol::StrictReviewRequiredNotification;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
@@ -88,6 +90,7 @@ use codex_app_server_protocol::guardian_auto_approval_review_notification;
 use codex_app_server_protocol::item_event_to_server_notification;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
+use codex_guardian_v2::StrictReviewReason;
 use codex_protocol::ThreadId;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -114,6 +117,7 @@ use codex_sandboxing::policy_transforms::intersect_permission_profiles;
 use codex_shell_command::parse_command::shlex_join;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -320,6 +324,22 @@ pub(crate) async fn apply_bespoke_event_handling(
                 &assessment,
             );
             outgoing.send_server_notification(notification).await;
+            if assessment.status == codex_protocol::protocol::GuardianAssessmentStatus::InProgress
+                && conversation
+                    .thread_extension_data()
+                    .remove::<StrictReviewReason>()
+                    .is_some()
+            {
+                outgoing
+                    .send_server_notification(ServerNotification::StrictReviewRequired(
+                        StrictReviewRequiredNotification {
+                            thread_id: conversation_id.to_string(),
+                            turn_id: assessment_turn_id.clone(),
+                            started_at_ms: assessment.started_at_ms,
+                        },
+                    ))
+                    .await;
+            }
             let completion_status = match assessment.status {
                 codex_protocol::protocol::GuardianAssessmentStatus::Denied
                 | codex_protocol::protocol::GuardianAssessmentStatus::Aborted => {
@@ -593,6 +613,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .map(CommandExecutionApprovalDecision::from)
                 .collect::<Vec<_>>();
             let ExecApprovalRequestEvent {
+                kind,
                 call_id,
                 plugin_id,
                 script_path,
@@ -610,23 +631,47 @@ pub(crate) async fn apply_bespoke_event_handling(
                 parsed_cmd,
                 ..
             } = ev;
-            let command_actions = parsed_cmd
-                .iter()
-                .cloned()
-                .map(|parsed| V2ParsedCommand::from_core_with_cwd(parsed, &cwd))
-                .collect::<Vec<_>>();
+            let cwd_uri = match PathUri::try_from(cwd.clone()) {
+                Ok(cwd) => cwd,
+                Err(err) => {
+                    error!(%err, "invalid command approval cwd");
+                    if let Err(err) = conversation
+                        .submit(Op::ExecApproval {
+                            id: approval_id.unwrap_or(call_id),
+                            turn_id: Some(turn_id),
+                            decision: ReviewDecision::denied("invalid command approval cwd"),
+                        })
+                        .await
+                    {
+                        error!(%err, "failed to reject invalid command approval");
+                    }
+                    return;
+                }
+            };
+            let command_presentation =
+                CommandExecutionPresentation::from_raw(&command, &parsed_cmd, &cwd_uri);
+            // Approval requests retain the exact command; only history is redacted.
+            let command_actions = match cwd_uri.to_abs_path() {
+                Ok(native_cwd) => parsed_cmd
+                    .iter()
+                    .cloned()
+                    .map(|parsed| V2ParsedCommand::from_core_with_cwd(parsed, &native_cwd))
+                    .collect(),
+                Err(_) => vec![V2ParsedCommand::Unknown {
+                    command: shlex_join(&command),
+                }],
+            };
             let presentation = if let Some(network_approval_context) =
                 network_approval_context.map(V2NetworkApprovalContext::from)
             {
                 CommandExecutionApprovalPresentation::Network(network_approval_context)
             } else {
-                let command_string = shlex_join(&command);
                 let completion_item = CommandExecutionCompletionItem {
                     plugin_id,
                     script_path,
-                    command: command_string,
-                    cwd: cwd.clone().into(),
-                    command_actions: command_actions.clone(),
+                    command: command_presentation.command,
+                    cwd: cwd.clone(),
+                    command_actions: command_presentation.command_actions,
                 };
                 CommandExecutionApprovalPresentation::Command(completion_item)
             };
@@ -637,9 +682,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                     }
                     CommandExecutionApprovalPresentation::Command(completion_item) => (
                         None,
-                        Some(completion_item.command.clone()),
+                        Some(shlex_join(&command)),
                         Some(completion_item.cwd.clone()),
-                        Some(completion_item.command_actions.clone()),
+                        Some(command_actions),
                         Some(completion_item),
                     ),
                 };
@@ -674,6 +719,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 additional_permissions.map(V2AdditionalPermissionProfile::from);
 
             let params = CommandExecutionRequestApprovalParams {
+                kind: kind.into(),
                 thread_id: conversation_id.to_string(),
                 turn_id: turn_id.clone(),
                 item_id: call_id.clone(),
@@ -741,6 +787,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_id: request.turn_id,
                 item_id: request.call_id,
                 questions,
+                is_blocking: request.is_blocking,
                 auto_resolution_ms: request.auto_resolution_ms,
             };
             let (pending_request_id, rx) = outgoing
@@ -939,6 +986,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
 
             let turn_error = TurnError {
+                misalignment: ev.misalignment.map(Into::into),
                 message: ev.message,
                 codex_error_info: ev.codex_error_info.map(V2CodexErrorInfo::from),
                 additional_details: None,
@@ -956,6 +1004,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             // We don't need to update the turn summary store for stream errors as they are intermediate error states for retries,
             // but we notify the client.
             let turn_error = TurnError {
+                misalignment: None,
                 message: ev.message,
                 codex_error_info: ev.codex_error_info.map(V2CodexErrorInfo::from),
                 additional_details: ev.additional_details,
@@ -1069,6 +1118,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_id: event_turn_id,
                 response_id: raw_response_completed_event.response_id,
                 usage: raw_response_completed_event.token_usage.map(Into::into),
+                usage_metadata: raw_response_completed_event.usage_metadata.map(Into::into),
             };
             outgoing
                 .send_server_notification(ServerNotification::RawResponseCompleted(notification))
@@ -1180,9 +1230,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 ))
                 .await;
         }
-        EventMsg::ThreadSettingsApplied(thread_settings_event) => {
+        EventMsg::ThreadQueueChanged(_) => {}
+        EventMsg::ThreadSettingsApplied(_) => {
             let thread_settings =
-                thread_settings_from_core_snapshot(thread_settings_event.thread_settings);
+                thread_settings_from_config_snapshot(&conversation.config_snapshot().await);
             let changed = {
                 let mut state = thread_state.lock().await;
                 state.note_thread_settings(thread_settings.clone())
@@ -1804,6 +1855,7 @@ async fn on_request_permissions_response(
                 conversation_id,
                 &turn_id,
                 TurnError {
+                    misalignment: None,
                     message,
                     codex_error_info: None,
                     additional_details: None,
@@ -2136,11 +2188,11 @@ mod tests {
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
-    use codex_protocol::protocol::RolloutItem;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TokenUsage;
     use codex_protocol::protocol::TokenUsageInfo;
     use codex_protocol::protocol::UserMessageEvent;
+    use codex_rollout::RolloutItem;
     use codex_thread_store::StoredThread;
     use codex_thread_store::StoredThreadHistory;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -2200,6 +2252,7 @@ mod tests {
                 message: "after rollback".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
             })),
         ];
         let stored_thread = StoredThread {
@@ -2217,7 +2270,10 @@ mod tests {
             updated_at: created_at,
             recency_at: created_at,
             archived_at: None,
-            is_pinned: false,
+            section: None,
+            section_position: None,
+            section_entered_at: None,
+            project_id: None,
             cwd: test_path_buf("/tmp").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
@@ -3272,6 +3328,7 @@ mod tests {
         handle_error(
             conversation_id,
             TurnError {
+                misalignment: None,
                 message: "boom".to_string(),
                 codex_error_info: Some(V2CodexErrorInfo::InternalServerError),
                 additional_details: None,
@@ -3284,6 +3341,7 @@ mod tests {
         assert_eq!(
             turn_summary.last_error,
             Some(TurnError {
+                misalignment: None,
                 message: "boom".to_string(),
                 codex_error_info: Some(V2CodexErrorInfo::InternalServerError),
                 additional_details: None,
@@ -3606,6 +3664,7 @@ mod tests {
                         ],
                         phase: None,
                         memory_citation: None,
+                        delivery: None,
                     }),
                     started_at_ms: Some(0),
                     completed_at_ms: 0,
@@ -3623,6 +3682,7 @@ mod tests {
                         }],
                         phase: None,
                         memory_citation: None,
+                        delivery: None,
                     }),
                     started_at_ms: Some(0),
                     completed_at_ms: 0,
@@ -3670,6 +3730,7 @@ mod tests {
         handle_error(
             conversation_id,
             TurnError {
+                misalignment: None,
                 message: "oops".to_string(),
                 codex_error_info: None,
                 additional_details: None,
@@ -3720,6 +3781,7 @@ mod tests {
         handle_error(
             conversation_id,
             TurnError {
+                misalignment: None,
                 message: "bad".to_string(),
                 codex_error_info: Some(V2CodexErrorInfo::Other),
                 additional_details: None,
@@ -3755,6 +3817,7 @@ mod tests {
                 assert_eq!(
                     n.turn.error,
                     Some(TurnError {
+                        misalignment: None,
                         message: "bad".to_string(),
                         codex_error_info: Some(V2CodexErrorInfo::Other),
                         additional_details: None,
@@ -3840,6 +3903,7 @@ mod tests {
                 output_tokens: 50,
                 reasoning_output_tokens: 9,
                 total_tokens: 200,
+                codex_rollout_budget_units: None,
             },
             last_token_usage: TokenUsage {
                 input_tokens: 10,
@@ -3848,6 +3912,7 @@ mod tests {
                 output_tokens: 7,
                 reasoning_output_tokens: 1,
                 total_tokens: 23,
+                codex_rollout_budget_units: None,
             },
             model_context_window: Some(4096),
         };
@@ -3965,6 +4030,7 @@ mod tests {
         handle_error(
             conversation_a,
             TurnError {
+                misalignment: None,
                 message: "a1".to_string(),
                 codex_error_info: Some(V2CodexErrorInfo::BadRequest),
                 additional_details: None,
@@ -3986,6 +4052,7 @@ mod tests {
         handle_error(
             conversation_b,
             TurnError {
+                misalignment: None,
                 message: "b1".to_string(),
                 codex_error_info: None,
                 additional_details: None,
@@ -4022,6 +4089,7 @@ mod tests {
                 assert_eq!(
                     n.turn.error,
                     Some(TurnError {
+                        misalignment: None,
                         message: "a1".to_string(),
                         codex_error_info: Some(V2CodexErrorInfo::BadRequest),
                         additional_details: None,
@@ -4040,6 +4108,7 @@ mod tests {
                 assert_eq!(
                     n.turn.error,
                     Some(TurnError {
+                        misalignment: None,
                         message: "b1".to_string(),
                         codex_error_info: None,
                         additional_details: None,

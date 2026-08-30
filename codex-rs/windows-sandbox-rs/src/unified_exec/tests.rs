@@ -1,6 +1,8 @@
 #![cfg(target_os = "windows")]
 
+use super::WindowsSandboxSessionRequest;
 use super::spawn_windows_sandbox_session_elevated_for_permission_profile;
+use super::spawn_windows_sandbox_session_for_level;
 use super::spawn_windows_sandbox_session_legacy;
 use crate::WindowsSandboxCancellationToken;
 use crate::ipc_framed::Message;
@@ -9,9 +11,11 @@ use crate::ipc_framed::read_frame;
 use crate::run_windows_sandbox_capture;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_pty::ProcessDriver;
+use codex_utils_pty::ProcessSignal;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::fs;
@@ -221,6 +225,43 @@ async fn collect_stdout_and_exit(
 }
 
 #[test]
+fn restricted_token_rejects_managed_network_before_spawn() {
+    current_thread_runtime().block_on(async {
+        let cwd = sandbox_cwd();
+        let codex_home = sandbox_home("restricted-token-managed-network");
+        let permission_profile = PermissionProfile::workspace_write();
+        let error = spawn_windows_sandbox_session_for_level(WindowsSandboxSessionRequest {
+            permission_profile: &permission_profile,
+            workspace_roots: &[],
+            codex_home: codex_home.path(),
+            command: Vec::new(),
+            cwd: cwd.as_path(),
+            env_map: HashMap::new(),
+            windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
+            proxy_enforced: true,
+            network_proxy_restricting_sid: None,
+            proxy_settings_mode: crate::WindowsSandboxProxySettingsMode::Preserve,
+            timeout_ms: None,
+            read_roots_override: None,
+            read_roots_include_platform_defaults: false,
+            write_roots_override: None,
+            deny_read_paths_override: &[],
+            deny_write_paths_override: &[],
+            tty: false,
+            stdin_open: false,
+            use_private_desktop: false,
+        })
+        .await
+        .expect_err("managed networking must fail before spawning an unelevated sandbox");
+
+        assert_eq!(
+            error.to_string(),
+            "managed networking requires the elevated Windows sandbox backend"
+        );
+    });
+}
+
+#[test]
 fn legacy_non_tty_cmd_emits_output() {
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
@@ -345,7 +386,7 @@ fn legacy_non_tty_cmd_rejects_deny_read_overrides() {
 }
 
 #[test]
-fn legacy_non_tty_powershell_emits_output() {
+fn legacy_non_tty_powershell_interrupt_terminates_process() {
     let Some(pwsh) = pwsh_path() else {
         return;
     };
@@ -364,11 +405,11 @@ fn legacy_non_tty_powershell_emits_output() {
                 pwsh.display().to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                "Write-Output LEGACY-NONTTY-DIRECT".to_string(),
+                "Write-Output LEGACY-NONTTY-DIRECT; [System.Threading.ManualResetEvent]::new($false).WaitOne()".to_string(),
             ],
             cwd.as_path(),
             HashMap::new(),
-            Some(5_000),
+            /*timeout_ms*/ None,
             &[],
             &[],
             /*tty*/ false,
@@ -378,12 +419,41 @@ fn legacy_non_tty_powershell_emits_output() {
         .await
         .expect("spawn legacy non-tty powershell session");
         println!("pwsh spawn returned");
-        let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(10)).await;
-        println!("pwsh collect returned exit_code={exit_code}");
-        let stdout = String::from_utf8_lossy(&stdout);
-        assert_eq!(exit_code, 0, "stdout={stdout:?}");
-        assert!(stdout.contains("LEGACY-NONTTY-DIRECT"), "stdout={stdout:?}");
+        let codex_utils_pty::SpawnedProcess {
+            session,
+            mut stdout_rx,
+            stderr_rx: _stderr_rx,
+            exit_rx,
+        } = spawned;
+        timeout(Duration::from_secs(5), async {
+            let mut stdout = Vec::new();
+            while let Some(chunk) = stdout_rx.recv().await {
+                stdout.extend(chunk);
+                if String::from_utf8_lossy(&stdout).contains("LEGACY-NONTTY-DIRECT") {
+                    return;
+                }
+            }
+            panic!(
+                "PowerShell exited before emitting its readiness marker\n{}",
+                sandbox_log(codex_home.path())
+            );
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for PowerShell readiness marker\n{}",
+                sandbox_log(codex_home.path())
+            )
+        });
+
+        session
+            .signal(ProcessSignal::Interrupt)
+            .expect("interrupt should terminate the restricted-token process job");
+        let exit_code = timeout(Duration::from_secs(5), exit_rx)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for exit\n{}", sandbox_log(codex_home.path())))
+            .expect("interrupted process should report an exit code");
+        assert_eq!(exit_code, 1);
     });
 }
 
@@ -405,6 +475,7 @@ fn finish_driver_spawn_keeps_stdin_open_when_requested() {
                 terminator: None,
                 writer_handle: None,
                 resizer: None,
+                tty: false,
             },
             /*stdin_open*/ true,
         );
@@ -437,6 +508,7 @@ fn finish_driver_spawn_closes_stdin_when_not_requested() {
                 terminator: None,
                 writer_handle: None,
                 resizer: None,
+                tty: false,
             },
             /*stdin_open*/ false,
         );

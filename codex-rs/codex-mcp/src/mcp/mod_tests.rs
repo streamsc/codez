@@ -16,6 +16,7 @@ use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
     McpConfig {
@@ -26,21 +27,38 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         auth_keyring_backend_kind: AuthKeyringBackendKind::default(),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
+        optional_mcp_startup_grace: DEFAULT_OPTIONAL_MCP_STARTUP_GRACE,
         skill_mcp_dependency_install_enabled: true,
         approval_policy: Constrained::allow_any(AskForApproval::OnRequest),
         permission_profile: PermissionProfile::default(),
         config_layer_stack: codex_config::ConfigLayerStack::default(),
         approvals_reviewer: codex_config::types::ApprovalsReviewer::default(),
         environment_cwds: HashMap::new(),
+        server_permission_profiles: HashMap::new(),
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         apps_enabled: false,
         prefix_mcp_tool_names: true,
         non_prefixed_mcp_tool_servers: Vec::new(),
+        protocol_mode: McpProtocolMode::Legacy,
         client_elicitation_capability: ElicitationCapability::default(),
         mcp_server_catalog: ResolvedMcpCatalog::default(),
         connector_snapshot: codex_connectors::ConnectorSnapshot::default(),
     }
+}
+
+pub(crate) fn test_elicitation_config(
+    server_name: &str,
+    approval_policy: AskForApproval,
+    permission_profile: PermissionProfile,
+) -> Arc<McpConfig> {
+    let mut config = test_mcp_config(PathBuf::new());
+    config.approval_policy = Constrained::allow_any(approval_policy);
+    config.permission_profile = permission_profile.clone();
+    config
+        .server_permission_profiles
+        .insert(server_name.to_string(), permission_profile);
+    Arc::new(config)
 }
 
 #[test]
@@ -48,6 +66,47 @@ fn qualified_mcp_tool_name_prefix_sanitizes_server_names_without_lowercasing() {
     assert_eq!(
         qualified_mcp_tool_name_prefix("Some-Server"),
         "mcp__Some_Server__".to_string()
+    );
+}
+
+#[test]
+fn mcp_server_permissions_handle_unattached_and_threadless_servers() {
+    let mut config = test_mcp_config(PathBuf::new());
+    config.permission_profile = PermissionProfile::Disabled;
+    let mut missing_server = codex_apps_mcp_server_config(
+        "https://example.com",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
+    missing_server.environment_id = "missing".to_string();
+    let mut selected_server = missing_server.clone();
+    selected_server.environment_id = "unattached".to_string();
+    let mut catalog = ResolvedMcpCatalog::builder();
+    catalog.register(McpServerRegistration::from_config(
+        "missing".to_string(),
+        missing_server,
+    ));
+    catalog.register(McpServerRegistration::from_selected_plugin(
+        "selected".to_string(),
+        McpPluginAttribution::new("selected@test".to_string(), "Selected".to_string()),
+        /*selection_order*/ 0,
+        selected_server,
+    ));
+    config.mcp_server_catalog = catalog.build();
+    let servers = effective_mcp_servers(&config, /*auth*/ None);
+    assert_eq!(config.permission_profile_for_server("selected"), None);
+    config.set_server_permission_profiles(&servers, std::iter::empty());
+
+    assert_eq!(
+        config.permission_profile_for_server("selected"),
+        Some(&PermissionProfile::Disabled)
+    );
+    assert_eq!(config.permission_profile_for_server("missing"), None);
+
+    let config = config.for_threadless_operations(&servers);
+    assert_eq!(
+        config.permission_profile_for_server("selected"),
+        Some(&PermissionProfile::default())
     );
 }
 
@@ -147,6 +206,7 @@ fn tool_plugin_provenance_collects_app_and_mcp_sources() {
             PluginCapabilitySummary {
                 config_name: "alpha@test".to_string(),
                 display_name: "alpha-plugin".to_string(),
+                plugin_namespace: None,
                 app_connector_ids: vec![AppConnectorId("connector_example".to_string())],
                 mcp_server_names: vec!["alpha".to_string()],
                 ..PluginCapabilitySummary::default()
@@ -154,6 +214,7 @@ fn tool_plugin_provenance_collects_app_and_mcp_sources() {
             PluginCapabilitySummary {
                 config_name: "beta@test".to_string(),
                 display_name: "beta-plugin".to_string(),
+                plugin_namespace: None,
                 app_connector_ids: vec![
                     AppConnectorId("connector_example".to_string()),
                     AppConnectorId("connector_gmail".to_string()),
@@ -218,6 +279,7 @@ fn selected_mcp_attribution_does_not_join_an_unrelated_local_summary() {
             PluginCapabilitySummary {
                 config_name: "shared-plugin-id".to_string(),
                 display_name: "Local GitHub".to_string(),
+                plugin_namespace: None,
                 mcp_server_names: vec!["github".to_string()],
                 ..PluginCapabilitySummary::default()
             },
@@ -361,6 +423,25 @@ fn codex_apps_server_config_forwards_originator_and_configured_product_sku_heade
     }
 }
 
+#[test]
+fn effective_mcp_servers_preserve_chatgpt_auth_for_staging() {
+    for url in [
+        "https://chatgpt-staging.com",
+        "https://preview.chatgpt-staging.com",
+    ] {
+        let mut config = test_mcp_config(PathBuf::new());
+        config.chatgpt_base_url = url.to_string();
+        let server = codex_apps_mcp_server_config(
+            url, /*apps_mcp_product_sku*/ None, /*originator*/ None,
+        );
+        let configured = HashMap::from([("staging".to_string(), server)]);
+        let effective =
+            effective_mcp_servers_from_configured(configured, &config, /*auth*/ None);
+
+        assert_eq!(effective["staging"].config().auth, McpServerAuth::ChatGpt);
+    }
+}
+
 #[tokio::test]
 async fn effective_mcp_servers_preserve_runtime_servers() {
     let codex_home = tempfile::tempdir().expect("tempdir");
@@ -378,11 +459,13 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -404,11 +487,13 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,

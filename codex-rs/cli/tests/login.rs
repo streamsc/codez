@@ -1,5 +1,3 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -10,9 +8,13 @@ use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::write_chatgpt_auth;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::AuthKeyringBackendKind;
 use codex_login::CLIENT_ID;
+use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
-use predicates::prelude::PredicateBooleanExt;
+use codex_login::login_with_bedrock_access_keys;
+use codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR;
+use codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR;
 use predicates::str::contains;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -70,156 +72,114 @@ fn login_with_api_key_reads_stdin_and_writes_auth_json() -> Result<()> {
 }
 
 #[test]
-fn offline_api_bootstrap_writes_endpoint_model_and_api_key() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        "# keep this comment\ncli_auth_credentials_store = \"file\"\nmodel = \"old-model\"\nmodel_reasoning_effort = \"high\"\napproval_policy = \"never\"\n",
-    )?;
-    let secret = "sk-offline-secret";
-
-    let output = codex_command(codex_home.path())?
-        .args([
-            "offline-api-bootstrap",
-            "--api-base-url",
-            "https://gateway.internal/v1",
-            "--model",
-            "internal-model",
-        ])
-        .write_stdin(format!("{secret}\n"))
-        .output()?;
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.contains("https://gateway.internal/v1"));
-    assert!(stdout.contains("internal-model"));
-    assert!(!stdout.contains(secret));
-    assert!(!stderr.contains(secret));
-
-    let config_text = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    let _: toml::Value = toml::from_str(&config_text)?;
-    assert!(config_text.contains("# keep this comment"));
-    assert!(config_text.contains("openai_base_url = \"https://gateway.internal/v1\""));
-    assert!(config_text.contains("model_provider = \"openai\""));
-    assert!(config_text.contains("model = \"internal-model\""));
-    assert!(config_text.contains("model_reasoning_effort = \"high\""));
-    assert!(!config_text.contains(secret));
-
-    let auth = read_auth_json(codex_home.path())?;
-    assert_eq!(auth["OPENAI_API_KEY"], secret);
-    #[cfg(unix)]
-    assert_eq!(
-        std::fs::metadata(codex_home.path().join("auth.json"))?
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-    Ok(())
-}
-
-#[test]
-fn offline_api_bootstrap_without_model_preserves_existing_model() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        "cli_auth_credentials_store = \"file\"\nmodel = \"existing-model\"\n",
-    )?;
-
-    codex_command(codex_home.path())?
-        .args([
-            "offline-api-bootstrap",
-            "--api-base-url",
-            "http://gateway.internal/v1",
-        ])
-        .write_stdin("sk-test\n")
-        .assert()
-        .success()
-        .stdout(contains("http://gateway.internal/v1"))
-        .stdout(predicates::str::contains("default model").not());
-
-    let config_text = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    let _: toml::Value = toml::from_str(&config_text)?;
-    assert!(config_text.contains("model = \"existing-model\""));
-    assert!(config_text.contains("model_provider = \"openai\""));
-    Ok(())
-}
-
-#[test]
-fn offline_api_bootstrap_rejects_invalid_url_and_empty_key() -> Result<()> {
-    let invalid_url_home = TempDir::new()?;
-    codex_command(invalid_url_home.path())?
-        .args([
-            "offline-api-bootstrap",
-            "--api-base-url",
-            "ftp://gateway.internal/v1",
-        ])
-        .write_stdin("sk-test\n")
-        .assert()
-        .failure()
-        .stderr(contains("must use http or https"));
-    assert!(!invalid_url_home.path().join("config.toml").exists());
-
-    let empty_key_home = TempDir::new()?;
-    codex_command(empty_key_home.path())?
-        .args([
-            "offline-api-bootstrap",
-            "--api-base-url",
-            "https://gateway.internal/v1",
-        ])
-        .write_stdin("\n")
-        .assert()
-        .failure()
-        .stderr(contains("No API key provided via stdin"));
-    assert!(!empty_key_home.path().join("config.toml").exists());
-    Ok(())
-}
-
-#[test]
-fn offline_api_bootstrap_respects_forced_chatgpt_login() -> Result<()> {
+fn login_status_reports_auth_storage_errors() -> Result<()> {
     let codex_home = TempDir::new()?;
     write_file_auth_config(codex_home.path())?;
+    std::fs::write(codex_home.path().join("auth.json"), "{invalid json")?;
 
     codex_command(codex_home.path())?
-        .args([
-            "-c",
-            "forced_login_method=\"chatgpt\"",
-            "offline-api-bootstrap",
-            "--api-base-url",
-            "https://gateway.internal/v1",
-        ])
-        .write_stdin("sk-test\n")
+        .args(["login", "status"])
         .assert()
         .failure()
-        .stderr(contains("forced to ChatGPT"));
+        .stderr(contains("Error checking login status:"));
 
-    assert_eq!(
-        std::fs::read_to_string(codex_home.path().join("config.toml"))?,
-        "cli_auth_credentials_store = \"file\"\n"
-    );
-    assert!(!codex_home.path().join("auth.json").exists());
     Ok(())
 }
 
 #[test]
-fn offline_api_bootstrap_is_hidden_from_normal_help() -> Result<()> {
+fn login_status_validates_configured_workload_identity() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let help = codex_command(codex_home.path())?
-        .args(["--help"])
-        .output()?;
-    assert!(help.status.success());
-    assert!(!String::from_utf8_lossy(&help.stdout).contains("offline-api-bootstrap"));
+    write_file_auth_config(codex_home.path())?;
+    let missing_assertion = codex_home.path().join("missing-identity-token");
 
     codex_command(codex_home.path())?
-        .args(["offline-api-bootstrap", "--help"])
+        .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
+        .env(OPENAI_FEDERATION_RULE_ID_ENV_VAR, "rule-test")
+        .env(OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR, &missing_assertion)
+        .args(["login", "status"])
         .assert()
-        .success()
-        .stdout(contains("--api-base-url"));
+        .failure()
+        .stderr(contains("could not read workload identity assertion file"));
+
+    Ok(())
+}
+
+#[test]
+fn logout_clears_only_the_selected_bedrock_provider() -> Result<()> {
+    for (model_provider_id, managed_bedrock_auth, model) in [
+        ("amazon-bedrock", true, "openai.gpt-5.6-sol"),
+        ("amazon-bedrock-runtime", true, "global.openai.gpt-5.6-sol"),
+        ("openai", true, "gpt-5.6-sol"),
+        ("amazon-bedrock", false, "gpt-5.6-sol"),
+        ("amazon-bedrock-runtime", false, "us.openai.gpt-5.6-sol"),
+        ("openai", false, "gpt-5.6-sol"),
+    ] {
+        let codex_home = TempDir::new()?;
+        let config_path = codex_home.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "cli_auth_credentials_store = \"file\"\n\
+                 model_provider = \"{model_provider_id}\"\n\
+                 model = \"{model}\"\n\
+                 model_reasoning_effort = \"high\"\n\
+                 [model_providers.amazon-bedrock]\n\
+                 base_url = \"https://mantle.example.com/v1\"\n\
+                 [model_providers.amazon-bedrock.aws]\n\
+                 profile = \"mantle-profile\"\n\
+                 region = \"us-west-2\"\n\
+                 auth_refresh = {{ command = \"aws\", args = [\"sso\", \"login\"] }}\n\
+                 [model_providers.amazon-bedrock-runtime]\n\
+                 base_url = \"https://runtime.example.com/v1\"\n\
+                 [model_providers.amazon-bedrock-runtime.aws]\n\
+                 profile = \"runtime-profile\"\n\
+                 region = \"us-east-1\"\n\
+                 auth_refresh = {{ command = \"aws\", args = [\"login\"] }}\n"
+            ),
+        )?;
+        if managed_bedrock_auth {
+            login_with_bedrock_access_keys(
+                codex_home.path(),
+                "managed-access-key-id",
+                "managed-secret-access-key",
+                Some("managed-session-token"),
+                AuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::default(),
+            )?;
+        }
+        let mut expected_config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+        if model_provider_id != "openai" {
+            let expected_root = expected_config
+                .as_table_mut()
+                .expect("config should be a table");
+            expected_root.remove("model_provider");
+            expected_root.remove("model");
+            expected_root["model_providers"][model_provider_id]
+                .as_table_mut()
+                .expect("selected Bedrock provider should be a table")
+                .remove("aws");
+        }
+        let expected_message = if managed_bedrock_auth || model_provider_id != "openai" {
+            "Successfully logged out"
+        } else {
+            "Not logged in"
+        };
+
+        codex_command(codex_home.path())?
+            .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
+            .env("AWS_ACCESS_KEY_ID", "environment-access-key-id")
+            .env("AWS_SECRET_ACCESS_KEY", "environment-secret-access-key")
+            .args(["logout"])
+            .assert()
+            .success()
+            .stderr(contains(expected_message));
+
+        assert!(!codex_home.path().join("auth.json").exists());
+        let actual_config: toml::Value = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+        assert_eq!(actual_config, expected_config);
+    }
+
     Ok(())
 }
 

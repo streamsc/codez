@@ -178,6 +178,7 @@ fn reviewed_action_tag(action: &GuardianReviewedAction) -> &'static str {
     match action {
         GuardianReviewedAction::Shell { .. } => "shell",
         GuardianReviewedAction::UnifiedExec { .. } => "unified_exec",
+        GuardianReviewedAction::WriteStdin { .. } => "write_stdin",
         GuardianReviewedAction::Execve { .. } => "execve",
         GuardianReviewedAction::ApplyPatch {} => "apply_patch",
         GuardianReviewedAction::NetworkAccess { .. } => "network_access",
@@ -356,6 +357,7 @@ mod tests {
                 output_tokens: 3,
                 reasoning_output_tokens: 2,
                 total_tokens: 15,
+                codex_rollout_budget_units: None,
             }),
             time_to_first_token_ms: Some(123),
             ..GuardianReviewAnalyticsResult::without_session()
