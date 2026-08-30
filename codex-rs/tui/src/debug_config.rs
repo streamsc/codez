@@ -6,7 +6,6 @@ use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::ManagedHooksRequirementsToml;
 use codex_config::NetworkConstraints;
 use codex_config::NetworkDomainPermissionToml;
@@ -131,14 +130,11 @@ fn render_debug_config_lines(
             .bold()
             .into(),
     );
-    let layers = stack.get_layers(
-        ConfigLayerStackOrdering::LowestPrecedenceFirst,
-        /*include_disabled*/ true,
-    );
-    if layers.is_empty() {
+    let mut layers = stack.all_layers_low_to_high().peekable();
+    if layers.peek().is_none() {
         lines.push("  <none>".dim().into());
     } else {
-        for (index, layer) in layers.iter().enumerate() {
+        for (index, layer) in layers.enumerate() {
             let source = format_config_layer_source(&layer.name, CONFIG_TOML_FILE);
             let status = if layer.is_disabled() {
                 "disabled"
@@ -408,7 +404,8 @@ fn render_non_file_layer_details(layer: &ConfigLayerEntry) -> Vec<Line<'static>>
         ConfigLayerSource::Mdm { .. }
         | ConfigLayerSource::EnterpriseManaged { .. }
         | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => render_non_file_layer_value(layer),
-        ConfigLayerSource::System { .. }
+        ConfigLayerSource::PackagedDefaults { .. }
+        | ConfigLayerSource::System { .. }
         | ConfigLayerSource::User { .. }
         | ConfigLayerSource::Project { .. }
         | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. } => Vec::new(),
@@ -471,7 +468,8 @@ fn non_file_layer_value_label(source: &ConfigLayerSource) -> &'static str {
             "MDM value"
         }
         ConfigLayerSource::EnterpriseManaged { .. } => "Enterprise-managed config value",
-        ConfigLayerSource::SessionFlags
+        ConfigLayerSource::PackagedDefaults { .. }
+        | ConfigLayerSource::SessionFlags
         | ConfigLayerSource::System { .. }
         | ConfigLayerSource::User { .. }
         | ConfigLayerSource::Project { .. }
@@ -933,6 +931,10 @@ interrupt_message = false
         };
 
         let requirements_toml = ConfigRequirementsToml {
+            allowed_login_methods: None,
+            allowed_chatgpt_workspaces: None,
+            cli_auth_credentials_store: None,
+            chatgpt_base_url: None,
             sqlite_home: Some(sqlite_home),
             log_dir: Some(log_dir),
             model_catalog_json: Some(model_catalog_json),
@@ -951,12 +953,15 @@ interrupt_message = false
             allow_managed_hooks_only: Some(true),
             allow_appshots: Some(false),
             allow_remote_control: Some(false),
+            allow_browser_and_computer_use: None,
             computer_use: None,
             browser_use: None,
+            in_app_browser: None,
             windows: Some(WindowsRequirementsToml {
                 allowed_sandbox_implementations: None,
                 sandbox_private_desktop: Some(false),
             }),
+            additional_developer_instructions: None,
             guardian_policy_config: Some("Use the managed guardian policy.".to_string()),
             feature_requirements: Some(FeatureRequirementsToml {
                 entries: BTreeMap::from([("guardian_approval".to_string(), true)]),
@@ -977,6 +982,7 @@ interrupt_message = false
             enforce_residency: Some(ResidencyRequirement::Us),
             network: None,
             permissions: None,
+            auto_review: None,
             models: None,
         };
 

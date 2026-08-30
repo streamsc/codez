@@ -11,7 +11,10 @@ use crate::updates_cache::read_version_info;
 use crate::updates_cache::version_filepath;
 use chrono::Duration;
 use chrono::Utc;
-use codex_login::default_client::create_client;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::RouteAwareClientPool;
+use codex_login::default_client::default_headers;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -32,11 +35,12 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
         None => true,
         Some(info) => info.last_checked_at < Utc::now() - Duration::hours(20),
     } {
+        let http_client_factory = config.http_client_factory();
         // Refresh the cached latest version in the background so TUI startup
         // isn’t blocked by a network call. The UI reads the previously cached
         // value (if any) for this run; the next run shows the banner if needed.
         tokio::spawn(async move {
-            check_for_update(&version_file, action)
+            check_for_update(&version_file, action, http_client_factory)
                 .await
                 .inspect_err(|e| tracing::error!("Failed to update version: {e}"))
         });
@@ -61,8 +65,14 @@ struct ReleaseInfo {
 async fn check_for_update(
     version_file: &Path,
     _action: Option<UpdateAction>,
+    http_client_factory: HttpClientFactory,
 ) -> anyhow::Result<()> {
-    let latest_version = fetch_latest_github_release_version().await?;
+    let client_pool = RouteAwareClientPool::with_chatgpt_cloudflare_cookies(
+        http_client_factory,
+        ClientRouteClass::Other,
+    )
+    .with_legacy_custom_ca_fallback();
+    let latest_version = fetch_latest_github_release_version(&client_pool).await?;
 
     // Preserve any previously dismissed version if present.
     let prev_info = read_version_info(version_file).ok();
@@ -80,11 +90,14 @@ async fn check_for_update(
     Ok(())
 }
 
-async fn fetch_latest_github_release_version() -> anyhow::Result<String> {
+async fn fetch_latest_github_release_version(
+    client_pool: &RouteAwareClientPool,
+) -> anyhow::Result<String> {
     let ReleaseInfo {
         tag_name: latest_tag_name,
-    } = create_client()
+    } = client_pool
         .get(LATEST_RELEASE_URL)
+        .headers(default_headers())
         .send()
         .await?
         .error_for_status()?

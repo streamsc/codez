@@ -49,6 +49,8 @@ use crate::terminal_hyperlinks::annotate_web_urls_in_line;
 use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::terminal_hyperlinks::visible_lines;
 use crate::terminal_hyperlinks::web_destination;
+use crate::width::char_width;
+use crate::width::display_width;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::word_wrap_line;
@@ -64,7 +66,6 @@ use pulldown_cmark::Parser;
 use pulldown_cmark::Tag;
 use pulldown_cmark::TagEnd;
 use ratatui::style::Style;
-use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::text::Text;
@@ -73,15 +74,15 @@ use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
-use unicode_width::UnicodeWidthChar;
-use unicode_width::UnicodeWidthStr;
 use url::Url;
 
 mod streaming;
 mod table_key_value;
+mod web_links;
 
 pub(crate) use streaming::StreamingMarkdownRender;
 pub(crate) use streaming::render_streaming_markdown_lines_with_width_and_cwd;
+pub(crate) use web_links::hide_web_link_destination;
 
 const TABLE_COLUMN_GAP: usize = 2;
 const TABLE_CELL_PADDING: usize = 1;
@@ -159,14 +160,6 @@ impl TableCell {
     fn ensure_line(&mut self) {
         if self.lines.is_empty() {
             self.lines.push(HyperlinkLine::new(Line::default()));
-        }
-    }
-
-    #[inline]
-    fn push_span(&mut self, span: Span<'static>) {
-        self.ensure_line();
-        if let Some(line) = self.lines.last_mut() {
-            line.line.push_span(span);
         }
     }
 
@@ -319,6 +312,8 @@ pub(crate) fn render_markdown_text_with_width_and_cwd(
     )))
 }
 
+/// Keep destinations visible by default, including for callers that discard hyperlink metadata.
+/// Semantic output paths supply their hidden-destination policy explicitly.
 pub(crate) fn render_markdown_lines_with_width_and_cwd(
     input: &str,
     width: Option<usize>,
@@ -356,6 +351,7 @@ struct LinkState {
     destination: String,
     show_destination: bool,
     style_label: bool,
+    has_visible_label: bool,
     /// Pre-rendered display text for local file links.
     ///
     /// When this is present, the markdown label is intentionally suppressed so the rendered
@@ -1025,10 +1021,16 @@ where
     }
 
     fn push_span_to_table_cell(&mut self, span: Span<'static>) {
+        let span = self.style_link_label(span);
+        let mut annotated = HyperlinkLine::new(Line::default());
+        annotated.push_span(
+            span,
+            self.link.as_ref().map(|link| link.destination.as_str()),
+        );
         if let Some(table_state) = self.table_state.as_mut()
             && let Some(cell) = table_state.current_cell.as_mut()
         {
-            cell.push_span(span);
+            cell.push_annotated(annotated);
         }
     }
 
@@ -1051,7 +1053,7 @@ where
     }
 
     fn push_text_spans_to_table_cell(&mut self, text: &str, style: Style) {
-        let span = Span::styled(text.to_string(), style);
+        let span = self.style_link_label(Span::styled(text.to_string(), style));
         let destination = self
             .link
             .as_ref()
@@ -1303,7 +1305,7 @@ where
                 let plain = cell.plain_text();
                 let mut word_count = 0usize;
                 for token in plain.split_whitespace() {
-                    let token_width = token.width();
+                    let token_width = display_width(token);
                     body_token_width = body_token_width.max(token_width);
                     long_body_token_count += usize::from(token_width >= 20);
                     word_count += 1;
@@ -1312,7 +1314,7 @@ where
                     body_token_count += word_count;
                     total_words += word_count;
                     total_cells += 1;
-                    total_cell_width += plain.width();
+                    total_cell_width += display_width(&plain);
                 }
             }
 
@@ -1322,7 +1324,7 @@ where
                 total_words as f64 / total_cells as f64
             };
             let avg_cell_width = if total_cells == 0 {
-                header_plain.width() as f64
+                display_width(&header_plain) as f64
             } else {
                 total_cell_width as f64 / total_cells as f64
             };
@@ -1608,7 +1610,7 @@ where
                     } else {
                         current_text.push(ch);
                     }
-                    column += UnicodeWidthChar::width(ch).unwrap_or(/*default*/ 0);
+                    column += char_width(ch);
                 }
                 flush(&mut out, &mut current_text, current_destination);
             }
@@ -1757,7 +1759,10 @@ where
 
     #[inline]
     fn spans_display_width(spans: &[Span<'_>]) -> usize {
-        spans.iter().map(|span| span.content.width()).sum()
+        spans
+            .iter()
+            .map(|span| display_width(span.content.as_ref()))
+            .sum()
     }
 
     #[inline]
@@ -1776,7 +1781,10 @@ where
 
     #[inline]
     fn longest_token_width(text: &str) -> usize {
-        text.split_whitespace().map(str::width).max().unwrap_or(0)
+        text.split_whitespace()
+            .map(display_width)
+            .max()
+            .unwrap_or(0)
     }
 
     fn push_inline_style(&mut self, style: Style) {
@@ -1789,6 +1797,17 @@ where
         self.inline_styles.pop();
     }
 
+    fn style_link_label(&mut self, mut span: Span<'static>) -> Span<'static> {
+        if let Some(link) = self.link.as_mut()
+            && web_destination(&link.destination).is_some()
+        {
+            link.has_visible_label |=
+                !span.content.trim().is_empty() && display_width(&span.content) > 0;
+            span.style = span.style.patch(self.styles.link);
+        }
+        span
+    }
+
     fn push_link(&mut self, dest_url: String) {
         let style_label = (self.is_hidden_link_destination)(&dest_url);
         if style_label {
@@ -1798,6 +1817,7 @@ where
         self.link = Some(LinkState {
             show_destination,
             style_label,
+            has_visible_label: false,
             local_target_display: if is_local_path_like_link(&dest_url) {
                 render_local_link_target(&dest_url, self.cwd.as_deref())
             } else {
@@ -1812,7 +1832,9 @@ where
             if link.style_label {
                 self.pop_inline_style();
             }
-            if link.show_destination {
+            if link.show_destination
+                || (!link.has_visible_label && web_destination(&link.destination).is_some())
+            {
                 // Link destinations are rendered as " (url)" suffixes. When parsing table cells,
                 // append the suffix into the active cell buffer rather than the outer paragraph
                 // line to avoid detached url lines.
@@ -1888,7 +1910,7 @@ where
                 }
             } else {
                 let mut spans = self.current_initial_indent.clone();
-                let shift = spans.iter().map(|span| span.content.width()).sum::<usize>();
+                let shift = Self::spans_display_width(&spans);
                 spans.append(&mut line.line.spans);
                 for hyperlink in &mut line.hyperlinks {
                     hyperlink.columns =
@@ -1927,7 +1949,7 @@ where
         };
 
         let mut spans = self.prefix_spans(pending_marker_line);
-        let shift = spans.iter().map(|span| span.content.width()).sum::<usize>();
+        let shift = Self::spans_display_width(&spans);
         spans.append(&mut line.line.spans);
         for hyperlink in &mut line.hyperlinks {
             hyperlink.columns = hyperlink.columns.start + shift..hyperlink.columns.end + shift;
@@ -1965,10 +1987,15 @@ where
     }
 
     fn push_span(&mut self, span: Span<'static>) {
+        let span = self.style_link_label(span);
+        if self.current_line_content.is_none() {
+            self.push_line(Line::default());
+        }
         if let Some(line) = self.current_line_content.as_mut() {
-            line.line.push_span(span);
-        } else {
-            self.push_line(Line::from(vec![span]));
+            line.push_span(
+                span,
+                self.link.as_ref().map(|link| link.destination.as_str()),
+            );
         }
     }
 
@@ -1988,7 +2015,7 @@ where
     }
 
     fn push_text_spans(&mut self, text: &str, style: Style) {
-        let span = Span::styled(text.to_string(), style);
+        let span = self.style_link_label(Span::styled(text.to_string(), style));
         let destination = self
             .link
             .as_ref()
@@ -2464,9 +2491,9 @@ mod tests {
     #[test]
     fn wrap_cell_preserves_hard_break_lines() {
         let mut cell = TableCell::default();
-        cell.push_span("first line".into());
+        cell.push_annotated(Line::from("first line").into());
         cell.hard_break();
-        cell.push_span("second line".into());
+        cell.push_annotated(Line::from("second line").into());
 
         let writer = W::new(
             "",
@@ -2501,7 +2528,7 @@ mod tests {
     /// Build a single-line `TableCell` from plain text.
     fn make_cell(text: &str) -> TableCell {
         let mut cell = TableCell::default();
-        cell.push_span(Span::raw(text.to_string()));
+        cell.push_annotated(Line::from(text.to_string()).into());
         cell
     }
 
@@ -2843,6 +2870,13 @@ mod tests {
                 .iter()
                 .all(|link| link.destination == destination)
         }));
+    }
+
+    #[test]
+    fn table_widths_count_halfwidth_sound_marks() {
+        let cell = make_cell("ｶﾞﾊﾟ");
+        assert_eq!(W::cell_display_width(&cell), 4);
+        assert_eq!(W::longest_token_width("ｶﾞﾊﾟtail"), 8);
     }
 
     #[test]

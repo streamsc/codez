@@ -3,11 +3,17 @@
 //! It is responsible for:
 //!
 //! - Editing the input buffer (a [`TextArea`]), including placeholder "elements" for attachments.
-//! - Routing keys to the active popup (slash commands, file search, skill/apps mentions).
+//! - Routing keys to the active popup (slash commands, file search, skill/apps/task mentions).
 //! - Promoting typed slash commands into atomic elements when the command name is completed.
 //! - Handling submit vs newline on Enter.
 //! - Turning raw key streams into explicit paste operations on platforms where terminals
 //!   don't provide reliable bracketed paste (notably Windows).
+//!
+//! # Mention Menus
+//!
+//! By default, `@` lists plugins, filesystem entries, and skills. Skills are hidden when their
+//! owning plugin is listed. `$` lists individual skills and apps, but not plugins.
+//! Disabling `mentions_v2` restores file-only `@` search and adds plugins back to `$`.
 //!
 //! # Key Event Routing
 //!
@@ -41,12 +47,13 @@
 //!
 //! The Up/Down history path is managed by [`ChatComposerHistory`]. It merges:
 //!
-//! - Persistent cross-session history (text-only; no element ranges or attachments).
+//! - Persistent cross-session history (text-only storage; task links recover element ranges and
+//!   mention bindings, but attachments cannot be restored).
 //! - Local in-session history (full text + text elements + local/remote image attachments).
 //!
 //! When recalling a local entry, the composer rehydrates text elements and both attachment kinds
 //! (local image paths + remote image URLs).
-//! When recalling a persistent entry, only the text is restored.
+//! When recalling a persistent entry, encoded task links restore atomic elements and bindings.
 //! Recalled entries move the cursor to end-of-line so repeated Up/Down presses keep shell-like
 //! history traversal semantics instead of dropping to column 0.
 //! `Ctrl+R` opens a reverse incremental search mode. The footer becomes the search input; once the
@@ -56,6 +63,16 @@
 //! Slash commands are staged for local history instead of being recorded immediately. Command
 //! recall is a two-phase handoff: stage the submitted slash text here, then record it after
 //! `ChatWidget` dispatches the command.
+//!
+//! # Startup Draft Handoff
+//!
+//! Startup uses a provisional plain-text composer: editing remains available, but submission,
+//! popups, attachments, and other actions are disabled. [`ComposerDraftSnapshot`] transfers its
+//! text, cursor, pending paste placeholders, local history, and recent activity to the fully
+//! initialized composer.
+//! `ChatWidget` merges the draft with any existing initial prompt and attachments, rebasing cursor
+//! and placeholder positions while preserving both composers' contents. The draft remains deferred
+//! until protected views close, input is enabled, and required sandbox setup completes.
 //!
 //! # Submission and Prompt Expansion
 //!
@@ -67,6 +84,7 @@
 //!
 //! - Expands pending paste placeholders so element ranges align with the final text.
 //! - Trims whitespace and rebases text elements accordingly.
+//! - Treats a leading `!` revealed only by paste expansion as literal model input, not shell input.
 //! - Prunes local attached images so only placeholders that survive expansion are sent.
 //! - Preserves remote image URLs as separate attachments even when text is empty.
 //!
@@ -85,7 +103,8 @@
 //! Parent-owned subagent threads keep the draft editable while blocking agent-directed submission.
 //! On the `Enter` and `Tab` submission paths, normal prompts, disallowed slash commands, and `!`
 //! shell commands return `ParentOwnedInputBlocked` without clearing the draft. Bare local and
-//! navigation slash commands remain available so users can leave or manage the view.
+//! navigation slash commands remain available so users can leave or manage the view. Transcript
+//! exports also remain available, including an explicit destination filename.
 //!
 //! # Reasoning Effort Animations
 //!
@@ -133,7 +152,8 @@
 //! `KeyCode::Char` and `KeyCode::Enter` key events instead of a single paste event.
 //!
 //! To avoid misinterpreting these bursts as real typing (and to prevent transient UI effects like
-//! shortcut overlays toggling on a pasted `?`), we feed "plain" character events into
+//! shortcut overlays toggling on a pasted `?`), we feed text-producing character events (plain,
+//! Shift, or Windows AltGr) into
 //! [`PasteBurst`](super::paste_burst::PasteBurst), which buffers bursts and later flushes them
 //! through [`ChatComposer::handle_paste`].
 //!
@@ -171,6 +191,7 @@
 //!
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
+use crate::key_hint::ShortcutHint;
 use crate::key_hint::has_ctrl_or_alt;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::ui_consts::FOOTER_INDENT_COLS;
@@ -192,6 +213,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
+use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 
 use codex_protocol::openai_models::ReasoningEffort;
@@ -247,9 +269,11 @@ use crate::bottom_pane::paste_burst::FlushResult;
 use crate::history_cell::sanitize_user_text;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::EditorKeymap;
+use crate::keymap::KeymapContext;
+use crate::keymap::KeymapContextSet;
 use crate::keymap::RuntimeKeymap;
 use crate::keymap::VimNormalKeymap;
-use crate::keymap::primary_binding;
+use crate::keymap::user_bindings;
 use crate::onboarding::mark_underlined_hyperlink;
 use crate::render::Insets;
 use crate::render::RectExt;
@@ -306,6 +330,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -353,6 +378,10 @@ pub enum InputResult {
 }
 
 fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
+    if command == SlashCommand::Export {
+        return true;
+    }
+
     args.is_empty()
         && matches!(
             command,
@@ -363,7 +392,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::App
                 | SlashCommand::Side
                 | SlashCommand::Btw
-                | SlashCommand::Agent
+                | SlashCommand::Agents
                 | SlashCommand::MultiAgents
                 | SlashCommand::Vim
                 | SlashCommand::Keymap
@@ -403,6 +432,8 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuedInputAction {
     Plain,
+    /// Preserve model-input provenance when paste expansion reveals a leading shell sigil.
+    Literal,
     ParseSlash,
     RunShell,
 }
@@ -476,6 +507,7 @@ pub(crate) struct ChatComposer {
     pending_slash_command_history: Option<HistoryEntry>,
     skills: Option<Vec<SkillMetadata>>,
     plugins: Option<Vec<PluginCapabilitySummary>>,
+    task_mentions: Option<Vec<crate::task_mentions::TaskMention>>,
     connectors_snapshot: Option<ConnectorsSnapshot>,
     collaboration_modes_enabled: bool,
     config: ChatComposerConfig,
@@ -495,7 +527,7 @@ pub(crate) struct ChatComposer {
     toggle_shortcuts_keys: Vec<KeyBinding>,
     history_search_previous_keys: Vec<KeyBinding>,
     history_search_next_keys: Vec<KeyBinding>,
-    editor_keymap: EditorKeymap,
+    editor_keymap: Arc<EditorKeymap>,
     vim_normal_keymap: VimNormalKeymap,
 }
 
@@ -520,27 +552,17 @@ struct ComposerDraft {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ComposerDraftSnapshot {
     pub(crate) text: String,
+    pub(crate) cursor: usize,
     pub(crate) text_elements: Vec<TextElement>,
     pub(crate) local_images: Vec<LocalImageAttachment>,
     pub(crate) remote_image_urls: Vec<String>,
     pub(crate) mention_bindings: Vec<MentionBinding>,
     pub(crate) pending_pastes: Vec<(String, String)>,
+    pub(crate) startup_local_history: Vec<HistoryEntry>,
+    pub(crate) last_composer_activity_at: Option<Instant>,
 }
 
 const FOOTER_SPACING_HEIGHT: u16 = 0;
-
-/// Builds the one-line nudge that replaces the ambient footer without adding layout height.
-fn plan_mode_nudge_line() -> Line<'static> {
-    Line::from(vec![
-        "Create a plan?".magenta(),
-        "  ".into(),
-        key_hint::shift(KeyCode::Tab).into(),
-        " use Plan mode".into(),
-        "   ".into(),
-        key_hint::plain(KeyCode::Esc).into(),
-        " dismiss".into(),
-    ])
-}
 
 impl ChatComposer {
     fn slash_input(&self) -> SlashInput<'_> {
@@ -612,10 +634,10 @@ impl ChatComposer {
                 use_shift_enter_hint,
                 mode: FooterMode::ComposerEmpty,
                 hint_override: None,
-                plan_mode_nudge_visible: false,
                 flash: None,
                 context_window_percent: None,
                 context_window_used_tokens: None,
+                context_window_pending: false,
                 collaboration_mode_indicator: None,
                 goal_status_indicator: None,
                 ide_context_active: false,
@@ -624,19 +646,24 @@ impl ChatComposer {
                 status_line_enabled: false,
                 side_conversation_context_label: None,
                 active_agent_label: None,
-                external_editor_key: Some(key_hint::ctrl(KeyCode::Char('g'))),
-                show_transcript_key: Some(key_hint::ctrl(KeyCode::Char('t'))),
+                external_editor_key: default_keymap
+                    .primary_hint(KeymapContext::Global, "open_external_editor"),
+                show_transcript_key: default_keymap
+                    .primary_hint(KeymapContext::Global, "open_transcript"),
                 insert_newline_key: footer_insert_newline_key(
                     &default_keymap.editor.insert_newline,
                     use_shift_enter_hint,
-                ),
-                queue_key: Some(key_hint::plain(KeyCode::Tab)),
-                toggle_shortcuts_key: Some(key_hint::plain(KeyCode::Char('?'))),
-                history_search_key: primary_binding(
-                    &default_keymap.composer.history_search_previous,
-                ),
-                reasoning_down_key: primary_binding(&default_keymap.chat.decrease_reasoning_effort),
-                reasoning_up_key: primary_binding(&default_keymap.chat.increase_reasoning_effort),
+                )
+                .map(ShortcutHint::from),
+                queue_key: default_keymap.primary_hint(KeymapContext::Composer, "queue"),
+                toggle_shortcuts_key: default_keymap
+                    .primary_hint(KeymapContext::Composer, "toggle_shortcuts"),
+                history_search_key: default_keymap
+                    .primary_hint(KeymapContext::Composer, "history_search_previous"),
+                reasoning_down_key: default_keymap
+                    .primary_hint(KeymapContext::Chat, "decrease_reasoning_effort"),
+                reasoning_up_key: default_keymap
+                    .primary_hint(KeymapContext::Chat, "increase_reasoning_effort"),
             },
             has_focus: has_input_focus,
             frame_requester: None,
@@ -653,6 +680,7 @@ impl ChatComposer {
             pending_slash_command_history: None,
             skills: None,
             plugins: None,
+            task_mentions: None,
             connectors_snapshot: None,
             collaboration_modes_enabled: false,
             config,
@@ -678,6 +706,7 @@ impl ChatComposer {
             editor_keymap: default_editor_keymap,
             vim_normal_keymap: default_vim_normal_keymap,
         };
+        this.draft.textarea.set_keymap_bindings(&default_keymap);
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
         this
@@ -712,7 +741,6 @@ impl ChatComposer {
             self.effort_ignition = Some(EffortIgnition::new(tier, style));
             self.effort_animation_style = Some(style);
             if self.footer.status_line_enabled
-                && !self.footer.plan_mode_nudge_visible
                 && let Some(previous) = passive_footer_status_line(&self.footer_props())
             {
                 self.effort_status_line_transition =
@@ -748,6 +776,47 @@ impl ChatComposer {
         self.sync_popups();
     }
 
+    pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+        self.task_mentions = enabled.then(Vec::new);
+        self.refresh_mentions_v2_popup_candidates();
+        if enabled
+            && matches!(self.popups.active, ActivePopup::MentionV2(_))
+            && let Some(query) = self.current_mentions_v2_token()
+            && !query.is_empty()
+        {
+            self.app_event_tx.send(AppEvent::StartFileSearch(query));
+        }
+    }
+
+    pub(crate) fn task_mentions_enabled(&self) -> bool {
+        self.task_mentions.is_some()
+    }
+
+    pub(crate) fn on_task_search_result(
+        &mut self,
+        query: &str,
+        mut matches: Vec<crate::task_mentions::TaskMention>,
+    ) {
+        if self.current_mentions_v2_token().as_deref() != Some(query) {
+            return;
+        }
+        let mentioned_ids = self
+            .current_mention_elements()
+            .into_iter()
+            .filter_map(|(id, _, _)| self.draft.mention_bindings.get(&id))
+            .filter_map(|binding| crate::task_mentions::valid_thread_path(&binding.path))
+            .collect::<std::collections::HashSet<_>>();
+        matches.retain(|task| {
+            mentioned_ids.len() < crate::task_mentions::MAX_REFERENCED_TASKS
+                && !mentioned_ids.contains(task.thread_id.as_str())
+        });
+        let Some(task_mentions) = &mut self.task_mentions else {
+            return;
+        };
+        *task_mentions = matches;
+        self.refresh_mentions_v2_popup_candidates();
+    }
+
     /// Refreshes an open mention catalog when skill or plugin metadata changes.
     fn refresh_mentions_v2_popup_candidates(&mut self) {
         let ActivePopup::MentionV2(popup) = &mut self.popups.active else {
@@ -756,6 +825,7 @@ impl ChatComposer {
         popup.set_candidates(super::mentions_v2::build_search_catalog(
             self.skills.as_deref(),
             self.plugins.as_deref(),
+            self.task_mentions.as_deref().unwrap_or_default(),
         ));
     }
 
@@ -841,17 +911,39 @@ impl ChatComposer {
         self.editor_keymap = keymap.editor.clone();
         self.vim_normal_keymap = keymap.vim_normal.clone();
         self.draft.textarea.set_keymap_bindings(keymap);
-        self.footer.external_editor_key = primary_binding(&keymap.app.open_external_editor);
-        self.footer.show_transcript_key = primary_binding(&keymap.app.open_transcript);
-        self.footer.insert_newline_key = footer_insert_newline_key(
-            &keymap.editor.insert_newline,
-            self.footer.use_shift_enter_hint,
-        );
-        self.footer.queue_key = primary_binding(&keymap.composer.queue);
-        self.footer.toggle_shortcuts_key = primary_binding(&keymap.composer.toggle_shortcuts);
-        self.footer.history_search_key = primary_binding(&keymap.composer.history_search_previous);
-        self.footer.reasoning_down_key = primary_binding(&keymap.chat.decrease_reasoning_effort);
-        self.footer.reasoning_up_key = primary_binding(&keymap.chat.increase_reasoning_effort);
+        self.footer.external_editor_key =
+            keymap.primary_hint(KeymapContext::Global, "open_external_editor");
+        self.footer.show_transcript_key =
+            keymap.primary_hint(KeymapContext::Global, "open_transcript");
+        self.footer.insert_newline_key =
+            match keymap.primary_hint(KeymapContext::Editor, "insert_newline") {
+                hint @ Some(ShortcutHint::Chord { .. }) => hint,
+                _ => footer_insert_newline_key(
+                    &keymap.editor.insert_newline,
+                    self.footer.use_shift_enter_hint,
+                )
+                .map(ShortcutHint::from),
+            };
+        self.footer.queue_key = keymap.primary_hint(KeymapContext::Composer, "queue");
+        self.footer.toggle_shortcuts_key =
+            keymap.primary_hint(KeymapContext::Composer, "toggle_shortcuts");
+        self.footer.history_search_key =
+            keymap.primary_hint(KeymapContext::Composer, "history_search_previous");
+        self.footer.reasoning_down_key =
+            keymap.primary_hint(KeymapContext::Chat, "decrease_reasoning_effort");
+        self.footer.reasoning_up_key =
+            keymap.primary_hint(KeymapContext::Chat, "increase_reasoning_effort");
+    }
+
+    /// Return the contexts whose handlers can consume the next composer key.
+    pub(crate) fn keymap_contexts(&self) -> KeymapContextSet {
+        if self.history_search.is_some() {
+            return KeymapContextSet::new(KeymapContext::Composer);
+        }
+        if !self.draft.input_enabled || self.popups.active() {
+            return KeymapContextSet::default();
+        }
+        KeymapContextSet::new(KeymapContext::Composer).with(self.draft.textarea.keymap_context())
     }
 
     pub fn set_collaboration_mode_indicator(
@@ -1094,15 +1186,17 @@ impl ChatComposer {
     /// the next user Enter key, then syncs popup state.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
-        let pasted = sanitize_user_text(&pasted);
+        let pasted = sanitize_user_text(pasted.into());
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
             self.draft.textarea.insert_element(&placeholder);
-            self.draft.pending_pastes.push((placeholder, pasted));
+            self.draft
+                .pending_pastes
+                .push((placeholder, pasted.into_owned()));
         } else if char_count > 1
             && self.image_paste_enabled()
-            && self.handle_paste_image_path(pasted.clone())
+            && self.handle_paste_image_path(&pasted)
         {
             self.draft.textarea.insert_str(" ");
         } else {
@@ -1113,8 +1207,8 @@ impl ChatComposer {
         true
     }
 
-    pub fn handle_paste_image_path(&mut self, pasted: String) -> bool {
-        let Some(path_buf) = normalize_pasted_path(&pasted) else {
+    pub fn handle_paste_image_path(&mut self, pasted: &str) -> bool {
+        let Some(path_buf) = normalize_pasted_path(pasted) else {
             return false;
         };
 
@@ -1259,6 +1353,22 @@ impl ChatComposer {
         self.footer.mode = reset_mode_after_activity(self.footer.mode);
     }
 
+    /// Enable Vim while keeping already-active text entry in insert mode.
+    pub(crate) fn enable_vim_in_insert_mode(&mut self) {
+        self.set_vim_enabled(/*enabled*/ true);
+        self.draft.textarea.enter_vim_insert_mode();
+    }
+
+    /// Restore draft history transferred from the startup composer.
+    pub(crate) fn restore_startup_local_history(
+        &mut self,
+        startup_local_history: Vec<HistoryEntry>,
+    ) {
+        for entry in startup_local_history {
+            self.history.record_local_submission(entry);
+        }
+    }
+
     /// Toggle Vim editing and return the new enabled state.
     ///
     /// This is the app-level command target for the configurable Vim toggle
@@ -1270,8 +1380,7 @@ impl ChatComposer {
         enabled
     }
 
-    /// Return whether Vim editing is enabled for tests that assert mode transitions.
-    #[cfg(test)]
+    /// Return whether Vim editing is enabled.
     pub(crate) fn is_vim_enabled(&self) -> bool {
         self.draft.textarea.is_vim_enabled()
     }
@@ -1288,14 +1397,7 @@ impl ChatComposer {
     }
 
     fn vim_mode_indicator_span(&self) -> Option<Span<'static>> {
-        self.draft
-            .textarea
-            .vim_mode_label()
-            .map(|label| match label {
-                "Normal" => "Vim: Normal".magenta(),
-                "Insert" => "Vim: Insert".green(),
-                _ => unreachable!(),
-            })
+        self.draft.textarea.vim_mode_indicator_span()
     }
 
     fn mode_indicator_line(&self, show_cycle_hint: bool) -> Option<Line<'static>> {
@@ -1322,10 +1424,14 @@ impl ChatComposer {
     }
 
     fn right_footer_line_with_context(&self) -> Line<'static> {
-        let mut line = context_window_line(
-            self.footer.context_window_percent,
-            self.footer.context_window_used_tokens,
-        );
+        let mut line = if self.footer.context_window_pending {
+            Line::default()
+        } else {
+            context_window_line(
+                self.footer.context_window_percent,
+                self.footer.context_window_used_tokens,
+            )
+        };
         if let Some(vim_mode) = self.vim_mode_indicator_span() {
             line.spans.push(" | ".dim());
             line.spans.push(vim_mode);
@@ -1368,23 +1474,6 @@ impl ChatComposer {
     /// `None` restores the default shortcut footer.
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.footer.hint_override = items;
-    }
-
-    /// Updates whether the Plan-mode nudge replaces the ambient footer row.
-    ///
-    /// Returns `true` only when the rendered footer can change so callers can avoid scheduling
-    /// redundant redraws while reevaluating nudge policy on routine composer updates.
-    pub(crate) fn set_plan_mode_nudge_visible(&mut self, visible: bool) -> bool {
-        if self.footer.plan_mode_nudge_visible == visible {
-            return false;
-        }
-        self.footer.plan_mode_nudge_visible = visible;
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn plan_mode_nudge_visible(&self) -> bool {
-        self.footer.plan_mode_nudge_visible
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
@@ -1489,7 +1578,7 @@ impl ChatComposer {
         }
     }
 
-    fn set_current_cursor(&mut self, cursor: usize) {
+    pub(crate) fn set_current_cursor(&mut self, cursor: usize) {
         let visible_cursor = if self.draft.is_bash_mode {
             cursor.saturating_sub(1)
         } else {
@@ -1673,11 +1762,14 @@ impl ChatComposer {
     pub(crate) fn draft_snapshot(&self) -> ComposerDraftSnapshot {
         ComposerDraftSnapshot {
             text: self.current_text(),
+            cursor: self.current_cursor(),
             text_elements: self.text_elements(),
             local_images: self.local_images(),
             remote_image_urls: self.remote_image_urls(),
             mention_bindings: self.mention_bindings(),
             pending_pastes: self.pending_pastes(),
+            startup_local_history: self.history.startup_local_history().to_vec(),
+            last_composer_activity_at: None,
         }
     }
 
@@ -2686,9 +2778,18 @@ impl ChatComposer {
         let id = self.draft.textarea.insert_element(insert_text);
         let inserted_range = start_idx..start_idx.saturating_add(insert_text.len());
 
-        if let (Some(path), Some((sigil, mention))) =
-            (path, Self::mention_token_from_insert_text(insert_text))
+        let mention = if path
+            .and_then(crate::task_mentions::valid_thread_path)
+            .is_some()
         {
+            insert_text
+                .strip_prefix('@')
+                .filter(|name| !name.is_empty())
+                .map(|name| ('@', name.to_string()))
+        } else {
+            Self::mention_token_from_insert_text(insert_text)
+        };
+        if let (Some(path), Some((sigil, mention))) = (path, mention) {
             self.draft.mention_bindings.insert(
                 id,
                 ComposerMentionBinding {
@@ -2697,6 +2798,13 @@ impl ChatComposer {
                     path: path.to_string(),
                 },
             );
+        }
+        if path
+            .and_then(crate::task_mentions::valid_thread_path)
+            .is_some()
+            && let Some(task_mentions) = &mut self.task_mentions
+        {
+            task_mentions.clear();
         }
 
         self.advance_past_completion_separator();
@@ -2755,6 +2863,12 @@ impl ChatComposer {
             .text_element_snapshots()
             .into_iter()
             .filter_map(|snapshot| {
+                if let Some(binding) = self.draft.mention_bindings.get(&snapshot.id)
+                    && crate::task_mentions::valid_thread_path(&binding.path).is_some()
+                    && snapshot.text == format!("{}{}", binding.sigil, binding.mention)
+                {
+                    return Some((snapshot.id, binding.sigil, binding.mention.clone()));
+                }
                 Self::mention_token_from_insert_text(snapshot.text.as_str())
                     .map(|(sigil, mention)| (snapshot.id, sigil, mention))
             })
@@ -2788,9 +2902,17 @@ impl ChatComposer {
         let mut scan_from = 0usize;
         for binding in mention_bindings {
             let token = format!("{}{}", binding.sigil, binding.mention);
-            let Some(range) =
+            let range = if crate::task_mentions::valid_thread_path(&binding.path).is_some() {
+                self.draft
+                    .textarea
+                    .text_element_snapshots()
+                    .into_iter()
+                    .find(|element| element.range.start >= scan_from && element.text == token)
+                    .map(|element| element.range)
+            } else {
                 find_next_mention_token_range(text.as_str(), token.as_str(), scan_from)
-            else {
+            };
+            let Some(range) = range else {
                 continue;
             };
 
@@ -2929,13 +3051,29 @@ impl ChatComposer {
         }
         self.draft.recent_submission_mention_bindings = original_mention_bindings.clone();
         if record_history && (!text.is_empty() || !self.attachments.is_empty()) {
+            let preserve_literal_paste = self.slash_commands_enabled()
+                && text.starts_with('!')
+                && !original_input.trim_start().starts_with('!');
+            let (history_text, history_text_elements) = if preserve_literal_paste {
+                let history_text = original_input.trim().to_string();
+                let history_text_elements = Self::trim_text_elements(
+                    &original_input,
+                    &history_text,
+                    original_text_elements,
+                );
+                (history_text, history_text_elements)
+            } else {
+                (text.clone(), text_elements.clone())
+            };
             self.history.record_local_submission(HistoryEntry {
-                text: text.clone(),
-                text_elements: text_elements.clone(),
+                text: history_text,
+                text_elements: history_text_elements,
                 local_image_paths: self.attachments.local_image_paths(),
                 remote_image_urls: self.attachments.remote_image_urls(),
                 mention_bindings: original_mention_bindings,
-                pending_pastes: if pending_paste_handling == PendingPasteHandling::Preserve {
+                pending_pastes: if pending_paste_handling == PendingPasteHandling::Preserve
+                    || preserve_literal_paste
+                {
                     original_pending_pastes.clone()
                 } else {
                     Vec::new()
@@ -3013,6 +3151,10 @@ impl ChatComposer {
             if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
                 self.handle_paste(pasted);
             }
+            let visible_shell_command = self.is_bang_shell_command();
+            let original_input = self.current_text();
+            let original_text_elements = self.current_text_elements();
+            let original_pending_pastes = self.draft.pending_pastes.clone();
             let raw_text = self.draft.textarea.text();
             let defer_slash_validation = self.slash_input().should_parse_on_dequeue(raw_text);
             let preserve_pending_pastes = defer_slash_validation
@@ -3037,7 +3179,20 @@ impl ChatComposer {
                     PendingPasteHandling::Expand
                 },
             ) {
-                let action = slash_input::queued_input_action(&text, defer_slash_validation);
+                let action = if text.starts_with('!') && !visible_shell_command {
+                    QueuedInputAction::Literal
+                } else {
+                    slash_input::queued_input_action(&text, defer_slash_validation)
+                };
+                let (text, text_elements, pending_pastes) = if action == QueuedInputAction::Literal
+                {
+                    let text = original_input.trim().to_string();
+                    let text_elements =
+                        Self::trim_text_elements(&original_input, &text, original_text_elements);
+                    (text, text_elements, original_pending_pastes)
+                } else {
+                    (text, text_elements, pending_pastes)
+                };
                 return (
                     InputResult::Queued {
                         text,
@@ -3074,13 +3229,19 @@ impl ChatComposer {
         if let Some((text, text_elements)) =
             self.prepare_submission_text(/*record_history*/ true)
         {
-            if should_queue {
+            if self.slash_commands_enabled()
+                && text.starts_with('!')
+                && !original_input.trim_start().starts_with('!')
+            {
+                let text = original_input.trim().to_string();
+                let text_elements =
+                    Self::trim_text_elements(&original_input, &text, original_text_elements);
                 (
                     InputResult::Queued {
                         text,
                         text_elements,
-                        action: QueuedInputAction::Plain,
-                        pending_pastes: Vec::new(),
+                        action: QueuedInputAction::Literal,
+                        pending_pastes: original_pending_pastes,
                     },
                     true,
                 )
@@ -3439,8 +3600,8 @@ impl ChatComposer {
     ///
     /// - Always flush any *due* paste burst first so buffered text does not lag behind unrelated
     ///   edits.
-    /// - Then handle the incoming key, intercepting only "plain" (no Ctrl/Alt) char input.
-    /// - For non-plain keys, flush via `flush_before_modified_input()` before applying the key;
+    /// - Then handle the incoming key, intercepting only text-producing character input.
+    /// - For non-text keys, flush via `flush_before_modified_input()` before applying the key;
     ///   otherwise `clear_window_after_non_char()` can leave buffered text waiting without a
     ///   timestamp to time out against.
     fn handle_input_basic(&mut self, input: KeyEvent) -> (InputResult, bool) {
@@ -3475,19 +3636,21 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
 
-        // Intercept plain Char inputs to optionally accumulate into a burst buffer.
+        let has_non_text_modifier = has_ctrl_or_alt(input.modifiers)
+            || input
+                .modifiers
+                .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META);
+
+        // Intercept text-producing Char inputs to optionally accumulate into a burst buffer.
         //
-        // This is intentionally limited to "plain" (no Ctrl/Alt) chars so shortcuts keep their
-        // normal semantics, and so we can aggressively flush/clear any burst state when non-char
-        // keys are pressed.
+        // This preserves plain, Shift, and Windows AltGr input while keeping shortcut modifiers
+        // out of the burst detector and flushing any in-flight text before a non-text key.
         if let KeyEvent {
             code: KeyCode::Char(ch),
-            modifiers,
             ..
         } = input
         {
-            let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
-            if !has_ctrl_or_alt
+            if !has_non_text_modifier
                 && !self.draft.disable_paste_burst
                 && self.draft.textarea.allows_paste_burst()
             {
@@ -3575,14 +3738,10 @@ impl ChatComposer {
             self.reconcile_deleted_elements(elements_before);
         }
 
-        // Update paste-burst heuristic for plain Char (no Ctrl/Alt) events.
-        let crossterm::event::KeyEvent {
-            code, modifiers, ..
-        } = input;
-        match code {
+        // Update the paste-burst heuristic for text, shortcut, and non-char events.
+        match input.code {
             KeyCode::Char(_) => {
-                let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
-                if has_ctrl_or_alt {
+                if has_non_text_modifier {
                     self.draft.paste_burst.clear_window_after_non_char();
                 }
             }
@@ -3678,7 +3837,7 @@ impl ChatComposer {
                 queue: self.footer.queue_key,
                 insert_newline: self.footer.insert_newline_key,
                 external_editor: self.footer.external_editor_key,
-                edit_previous: Some(key_hint::plain(KeyCode::Esc)),
+                edit_previous: Some(key_hint::plain(KeyCode::Esc).into()),
                 show_transcript: self.footer.show_transcript_key,
                 history_search: self.footer.history_search_key,
                 reasoning_down: self.footer.reasoning_down_key,
@@ -4020,6 +4179,7 @@ impl ChatComposer {
                 let candidates = super::mentions_v2::build_search_catalog(
                     self.skills.as_deref(),
                     self.plugins.as_deref(),
+                    self.task_mentions.as_deref().unwrap_or_default(),
                 );
                 self.popups.active =
                     ActivePopup::MentionV2(MentionV2Popup::new(candidates, &query));
@@ -4053,7 +4213,9 @@ impl ChatComposer {
             }
         }
 
-        if let Some(plugins) = self.plugins.as_ref() {
+        if !self.mentions_v2_enabled
+            && let Some(plugins) = self.plugins.as_ref()
+        {
             for plugin in plugins {
                 let (plugin_name, marketplace_name) = plugin
                     .config_name
@@ -4165,7 +4327,6 @@ impl ChatComposer {
         self.footer.quit_shortcut_expires_at = None;
         self.footer.mode = FooterMode::ComposerEmpty;
         self.footer.hint_override = Some(Vec::new());
-        self.footer.plan_mode_nudge_visible = false;
         self.footer.flash = None;
     }
 
@@ -4185,6 +4346,10 @@ impl ChatComposer {
         }
         self.footer.context_window_percent = percent;
         self.footer.context_window_used_tokens = used_tokens;
+    }
+
+    pub(crate) fn set_context_window_pending(&mut self, pending: bool) {
+        self.footer.context_window_pending = pending;
     }
 
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
@@ -4246,6 +4411,7 @@ fn footer_insert_newline_key(
     bindings: &[KeyBinding],
     enhanced_keys_supported: bool,
 ) -> Option<KeyBinding> {
+    let bindings = user_bindings(bindings);
     let shift_enter = key_hint::shift(KeyCode::Enter);
     if enhanced_keys_supported && bindings.contains(&shift_enter) {
         return Some(shift_enter);
@@ -4481,17 +4647,6 @@ impl ChatComposer {
                 };
                 if let Some(line) = self.history_search_footer_line() {
                     render_footer_line(hint_rect, buf, line);
-                } else if self.footer.plan_mode_nudge_visible {
-                    let available_width =
-                        hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
-                    render_footer_line(
-                        hint_rect,
-                        buf,
-                        truncate_line_with_ellipsis_if_overflow(
-                            plan_mode_nudge_line(),
-                            available_width,
-                        ),
-                    );
                 } else {
                     let available_width =
                         hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
@@ -4665,7 +4820,7 @@ impl ChatComposer {
                         }
                     } else if self.footer.flash_visible() {
                         if let Some(flash) = self.footer.flash.as_ref() {
-                            flash.line.render(inset_footer_hint_area(hint_rect), buf);
+                            Widget::render(&flash.line, inset_footer_hint_area(hint_rect), buf);
                         }
                     } else if let Some(items) = active_footer_hint_override {
                         render_footer_hint_items(hint_rect, buf, items);
@@ -4703,11 +4858,11 @@ impl ChatComposer {
             }
         }
         let style = user_message_style();
-        Block::default().style(style).render_ref(composer_rect, buf);
+        Block::default().style(style).render(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.attachments.remote_image_lines())
                 .style(style)
-                .render_ref(remote_images_rect, buf);
+                .render(remote_images_rect, buf);
         }
         if !textarea_rect.is_empty() {
             let prompt = if self.draft.input_enabled {
@@ -4780,8 +4935,7 @@ impl ChatComposer {
             };
             if !textarea_rect.is_empty() {
                 let placeholder = Span::from(text).dim();
-                Line::from(vec![placeholder])
-                    .render_ref(textarea_rect.inner(Margin::new(0, 0)), buf);
+                Line::from(vec![placeholder]).render(textarea_rect.inner(Margin::new(0, 0)), buf);
             }
         }
         if matches!(self.popups.active, ActivePopup::None)
@@ -4851,9 +5005,54 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_footer_displays_configured_chords() {
+        use codex_config::types::KeybindingSpec;
+        use codex_config::types::KeybindingsSpec;
+        use codex_config::types::TuiKeymap;
+
+        let mut config = TuiKeymap::default();
+        config.global.open_external_editor = Some(KeybindingsSpec::One(KeybindingSpec(
+            "ctrl-g ctrl-g".to_string(),
+        )));
+        config.editor.insert_newline = Some(KeybindingsSpec::One(KeybindingSpec(
+            "ctrl-x enter".to_string(),
+        )));
+        let keymap = RuntimeKeymap::from_config(&config).expect("valid composer chords");
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_keymap_bindings(&keymap);
+        composer.footer.mode = FooterMode::ShortcutOverlay;
+
+        let hints = composer.footer_props().key_hints;
+        assert_eq!(
+            hints.external_editor,
+            Some(ShortcutHint::Chord {
+                prefix: key_hint::ctrl(KeyCode::Char('g')),
+                completion: key_hint::ctrl(KeyCode::Char('g')),
+            })
+        );
+        assert_eq!(
+            hints.insert_newline,
+            Some(ShortcutHint::Chord {
+                prefix: key_hint::ctrl(KeyCode::Char('x')),
+                completion: key_hint::plain(KeyCode::Enter),
+            })
+        );
+
+        snapshot_composer_state(
+            "footer_mode_configured_key_chords",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                composer.set_keymap_bindings(&keymap);
+                composer.footer.mode = FooterMode::ShortcutOverlay;
+            },
+        );
+    }
+
+    #[test]
     fn parent_owned_thread_allows_bare_navigation_commands() {
         for (command, expected) in [
-            ("/agent", SlashCommand::Agent),
+            ("/agents", SlashCommand::Agents),
+            ("/subagents", SlashCommand::MultiAgents),
             ("/side", SlashCommand::Side),
             ("/btw", SlashCommand::Btw),
             ("/diff ", SlashCommand::Diff),
@@ -4879,7 +5078,7 @@ mod tests {
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .0;
 
-        assert_eq!(result, InputResult::Command(SlashCommand::Agent));
+        assert_eq!(result, InputResult::Command(SlashCommand::Agents));
     }
 
     #[test]
@@ -4889,6 +5088,29 @@ mod tests {
             /*enhanced_keys_supported*/ false,
             ChatComposer::set_parent_owned_thread,
         );
+    }
+
+    #[test]
+    fn light_terminal_palette_renders_light_composer_snapshot() {
+        let colors = crate::terminal_probe::DefaultColors {
+            fg: (0x55, 0x57, 0x53),
+            bg: (0xff, 0xff, 0xff),
+        };
+
+        crate::terminal_palette::with_test_default_colors(colors, || {
+            let (composer, _rx) = new_test_composer();
+            let area = Rect::new(
+                /*x*/ 0, /*y*/ 0, /*width*/ 48, /*height*/ 6,
+            );
+            let mut buffer = Buffer::empty(area);
+            composer.render(area, &mut buffer);
+
+            assert_eq!(
+                buffer[(0, 1)].bg,
+                crate::terminal_palette::rgb_color((244, 244, 244))
+            );
+            insta::assert_snapshot!("light_terminal_palette_composer", format!("{buffer:?}"));
+        });
     }
 
     #[test]
@@ -6637,6 +6859,7 @@ mod tests {
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "sample@test".to_string(),
             display_name: "Sample Plugin".to_string(),
+            plugin_namespace: None,
             description: None,
             has_skills: true,
             mcp_server_names: vec!["sample".to_string()],
@@ -6663,6 +6886,7 @@ mod tests {
             path: test_path_buf(&format!("/tmp/{name}/SKILL.md")).abs(),
             scope: crate::test_support::skill_scope_user(),
             enabled: true,
+            plugin_id: None,
         }
     }
 
@@ -6689,6 +6913,7 @@ mod tests {
         PluginCapabilitySummary {
             config_name: format!("{name}@test"),
             display_name: name.to_string(),
+            plugin_namespace: None,
             description: Some(description.to_string()),
             has_skills: false,
             mcp_server_names: vec![name.to_string()],
@@ -7313,6 +7538,7 @@ mod tests {
             path: skill_path.clone(),
             scope: crate::test_support::skill_scope_user(),
             enabled: true,
+            plugin_id: None,
         }]));
 
         let ActivePopup::Skill(popup) = &composer.popups.active else {
@@ -7326,7 +7552,7 @@ mod tests {
     }
 
     #[test]
-    fn mention_items_show_plugin_owned_skill_and_app_duplicates() {
+    fn mention_items_keep_direct_skills_and_apps_with_unified_mentions() {
         let skill_path = test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs();
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
@@ -7357,10 +7583,12 @@ mod tests {
             path: skill_path.clone(),
             scope: crate::test_support::skill_scope_repo(),
             enabled: true,
+            plugin_id: Some("google-calendar@debug".to_string()),
         }]));
         composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
             config_name: "google-calendar@debug".to_string(),
             display_name: "Google Calendar".to_string(),
+            plugin_namespace: None,
             description: Some(
                 "Connect Google Calendar for scheduling, availability, and event management."
                     .to_string(),
@@ -7401,6 +7629,25 @@ mod tests {
         );
         assert_eq!(mentions[2].category_tag, Some("[App]".to_string()));
         assert_eq!(mentions[2].path, Some("app://google_calendar".to_string()));
+
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        assert_eq!(
+            composer
+                .mention_items()
+                .into_iter()
+                .map(|mention| (mention.insert_text, mention.path))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "$google-calendar:availability".to_string(),
+                    Some(skill_path.display().to_string()),
+                ),
+                (
+                    "$google-calendar".to_string(),
+                    Some("app://google_calendar".to_string()),
+                ),
+            ],
+        );
     }
 
     #[test]
@@ -7413,6 +7660,7 @@ mod tests {
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                     config_name: "sample@test".to_string(),
                     display_name: "Sample Plugin".to_string(),
+                    plugin_namespace: None,
                     description: Some(
                         "Plugin that includes the Figma MCP server and Skills for common workflows"
                             .to_string(),
@@ -7434,16 +7682,144 @@ mod tests {
                 let features = codex_features::Features::with_defaults();
                 composer
                     .set_mentions_v2_enabled(features.enabled(codex_features::Feature::MentionsV2));
+                composer.set_skill_mentions(Some(vec![
+                    SkillMetadata {
+                        name: "sample-tools:search".to_string(),
+                        plugin_id: Some("sample@test".to_string()),
+                        ..test_skill_metadata("sample-search")
+                    },
+                    SkillMetadata {
+                        name: "sample:summarize".to_string(),
+                        plugin_id: Some("sample@test".to_string()),
+                        ..test_skill_metadata("sample-summarize")
+                    },
+                    SkillMetadata {
+                        name: "sample:notes".to_string(),
+                        ..test_skill_metadata("sample-notes")
+                    },
+                    SkillMetadata {
+                        name: "sample:other".to_string(),
+                        plugin_id: Some("sample@other-marketplace".to_string()),
+                        ..test_skill_metadata("sample-other")
+                    },
+                ]));
                 composer.set_text_content("@sa".to_string(), Vec::new(), Vec::new());
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                     config_name: "sample@test".to_string(),
                     display_name: "Sample Plugin".to_string(),
+                    plugin_namespace: Some("sample".to_string()),
                     description: Some("Plugin with skills and an MCP server".to_string()),
                     has_skills: true,
                     mcp_server_names: vec!["sample".to_string()],
                     app_connector_ids: Vec::new(),
                 }]));
             },
+        );
+    }
+
+    #[test]
+    fn task_mention_popup_and_selected_composer_snapshots() {
+        for selected in [false, true] {
+            snapshot_composer_state(
+                if selected {
+                    "task_mention_selected_composer"
+                } else {
+                    "task_mention_popup"
+                },
+                /*enhanced_keys_supported*/ false,
+                |composer| {
+                    composer.set_mentions_v2_enabled(/*enabled*/ true);
+                    composer.set_task_mentions_enabled(/*enabled*/ true);
+                    composer.set_text_content("@migr".to_string(), Vec::new(), Vec::new());
+                    composer.on_task_search_result(
+                        "migr",
+                        vec![
+                            crate::task_mentions::TaskMention {
+                                thread_id: "task-123".to_string(),
+                                title: "Review database migration".to_string(),
+                                cwd: "/workspace/project".to_string(),
+                                snippet: "database migration".to_string(),
+                            },
+                            crate::task_mentions::TaskMention {
+                                thread_id: "task-456".to_string(),
+                                title: "migration".to_string(),
+                                cwd: "/another/project".to_string(),
+                                snippet: "migration".to_string(),
+                            },
+                        ],
+                    );
+                    if selected {
+                        composer
+                            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        assert!(matches!(composer.mention_bindings().as_slice(),
+                            [MentionBinding { mention, path, .. }]
+                                if mention == "Review database migration"
+                                    && path == "thread://task-123"));
+                        assert!(composer.task_mentions.as_ref().is_some_and(Vec::is_empty));
+                        let area = Rect::new(0, 0, 40, 5);
+                        let mut buf = Buffer::empty(area);
+                        composer.render(area, &mut buf);
+                        assert_eq!(buf[(2, 1)].style().fg, Some(Color::Cyan));
+                    }
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn task_mention_titles_are_normalized_and_bounded_before_insertion() {
+        let (mut composer, _rx) = new_test_composer();
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
+        composer.set_task_mentions_enabled(/*enabled*/ true);
+        composer.set_text_content("@task".to_string(), Vec::new(), Vec::new());
+        let task = crate::task_mentions::TaskMention {
+            thread_id: "task-123".to_string(),
+            title: format!("task\n\t{}é{}", "a".repeat(154), "é".repeat(200)),
+            cwd: "/workspace/project".to_string(),
+            snippet: String::new(),
+        };
+        composer.on_task_search_result("task", vec![task.clone()]);
+        composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            composer.mention_bindings(),
+            vec![MentionBinding {
+                sigil: '@',
+                mention: format!("task {}é", "a".repeat(154)),
+                path: "thread://task-123".to_string(),
+            }]
+        );
+        composer.draft.textarea.set_text_clearing_elements("@task");
+        composer.sync_popups();
+        composer.on_task_search_result("task", vec![task]);
+        assert!(matches!(&composer.popups.active,
+            ActivePopup::MentionV2(popup) if popup.selected().is_some()));
+
+        let history = HistoryEntry::new(
+            "[@sample](plugin://sample@test) @sample [@sample](thread://task-123)x".to_string(),
+        );
+        composer.set_text_content_with_mention_bindings(
+            history.text,
+            history.text_elements,
+            Vec::new(),
+            history.mention_bindings,
+        );
+        assert_eq!(
+            composer.mention_bindings(),
+            ["plugin://sample@test", "thread://task-123"]
+                .into_iter()
+                .map(|path| MentionBinding {
+                    sigil: '@',
+                    mention: "sample".to_string(),
+                    path: path.to_string(),
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            composer.draft.textarea.text_element_snapshots()[1]
+                .range
+                .start,
+            "@sample @sample ".len()
         );
     }
 
@@ -7521,6 +7897,7 @@ mod tests {
             /*width*/ 72,
             /*enhanced_keys_supported*/ false,
             |composer| {
+                composer.set_mentions_v2_enabled(/*enabled*/ true);
                 composer.set_connectors_enabled(/*enabled*/ true);
                 composer.set_text_content("$goog".to_string(), Vec::new(), Vec::new());
                 composer.set_skill_mentions(Some(vec![SkillMetadata {
@@ -7541,10 +7918,12 @@ mod tests {
                     path: test_path_buf("/tmp/repo/google-calendar/SKILL.md").abs(),
                     scope: crate::test_support::skill_scope_repo(),
                     enabled: true,
+                    plugin_id: None,
                 }]));
                 composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "google-calendar@debug".to_string(),
                 display_name: "Google Calendar".to_string(),
+                plugin_namespace: None,
                 description: Some(
                     "Connect Google Calendar for scheduling, availability, and event management."
                         .to_string(),
@@ -8113,6 +8492,7 @@ mod tests {
             composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
                 config_name: "sample@test".to_string(),
                 display_name: "sample".to_string(),
+                plugin_namespace: None,
                 description: None,
                 has_skills: true,
                 mcp_server_names: vec!["sample".to_string()],
@@ -11093,8 +11473,10 @@ mod tests {
         assert!(matches!(result, InputResult::Submitted { .. }));
 
         let mut keymap = RuntimeKeymap::defaults();
-        keymap.editor.move_up = vec![key_hint::plain(KeyCode::F(2))];
+        Arc::make_mut(&mut keymap.editor).move_up = vec![key_hint::plain(KeyCode::F(2))];
         composer.set_keymap_bindings(&keymap);
+        assert!(Arc::ptr_eq(&composer.editor_keymap, &keymap.editor));
+        assert_eq!(Arc::strong_count(&keymap.editor), 3);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert!(composer.draft.textarea.is_empty());
@@ -11776,6 +12158,148 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shortcut_modified_input_does_not_enter_paste_bursts() {
+        snapshot_composer_state(
+            "shortcut_modified_space_is_not_rendered",
+            /*enhanced_keys_supported*/ false,
+            |composer| {
+                let now = Instant::now();
+                for input in [
+                    KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SUPER),
+                    KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+                ] {
+                    composer.handle_input_basic_with_time(input, now);
+                }
+
+                assert!(
+                    composer.handle_paste_burst_flush(
+                        now + PasteBurst::recommended_active_flush_delay()
+                    )
+                );
+            },
+        );
+
+        for modifiers in [
+            KeyModifiers::SUPER,
+            KeyModifiers::SHIFT | KeyModifiers::SUPER,
+            KeyModifiers::HYPER,
+            KeyModifiers::META,
+        ] {
+            let (mut composer, _rx) = new_test_composer();
+            let now = Instant::now();
+
+            composer
+                .handle_input_basic_with_time(KeyEvent::new(KeyCode::Char(' '), modifiers), now);
+
+            assert!(
+                !composer.is_in_paste_burst(),
+                "shortcut modifiers {modifiers:?} must not start a paste burst"
+            );
+            assert!(
+                !composer.handle_paste_burst_flush(now + PasteBurst::recommended_flush_delay())
+            );
+            assert_eq!(composer.draft.textarea.text(), "");
+        }
+    }
+
+    #[test]
+    fn plain_and_shift_spaces_insert_normally() {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let (mut composer, _rx) = new_test_composer();
+            let now = Instant::now();
+
+            composer
+                .handle_input_basic_with_time(KeyEvent::new(KeyCode::Char(' '), modifiers), now);
+
+            assert!(composer.is_in_paste_burst());
+            assert_eq!(composer.draft.textarea.text(), "");
+            assert!(composer.handle_paste_burst_flush(now + PasteBurst::recommended_flush_delay()));
+            assert_eq!(composer.draft.textarea.text(), " ");
+            assert!(!composer.is_in_paste_burst());
+
+            let snapshot_name = if modifiers == KeyModifiers::NONE {
+                "plain_space_is_rendered"
+            } else {
+                "shift_space_is_rendered"
+            };
+            snapshot_composer_state(
+                snapshot_name,
+                /*enhanced_keys_supported*/ false,
+                |composer| {
+                    let now = Instant::now();
+                    for input in [
+                        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                        KeyEvent::new(KeyCode::Char(' '), modifiers),
+                        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+                    ] {
+                        composer.handle_input_basic_with_time(input, now);
+                    }
+
+                    assert!(composer.handle_paste_burst_flush(
+                        now + PasteBurst::recommended_active_flush_delay()
+                    ));
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn non_text_input_flushes_pending_paste_without_inserting_text() {
+        let (mut composer, _rx) = new_test_composer();
+        let now = Instant::now();
+
+        composer.handle_input_basic_with_time(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            now,
+        );
+        composer.handle_input_basic_with_time(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            now,
+        );
+
+        assert!(composer.is_in_paste_burst());
+        assert_eq!(composer.draft.textarea.text(), "");
+
+        composer.handle_input_basic_with_time(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SUPER),
+            now,
+        );
+
+        assert_eq!(composer.draft.textarea.text(), "ab");
+        assert!(!composer.is_in_paste_burst());
+        assert!(!composer.handle_paste_burst_flush(now + PasteBurst::recommended_flush_delay()));
+    }
+
+    #[test]
+    fn platform_specific_altgr_input_remains_text() {
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            let (mut composer, _rx) = new_test_composer();
+            let now = Instant::now();
+
+            composer
+                .handle_input_basic_with_time(KeyEvent::new(KeyCode::Char('@'), modifiers), now);
+
+            if cfg!(windows) {
+                assert!(composer.is_in_paste_burst());
+                assert!(
+                    composer.handle_paste_burst_flush(now + PasteBurst::recommended_flush_delay())
+                );
+                assert_eq!(composer.draft.textarea.text(), "@");
+            } else {
+                assert!(!composer.is_in_paste_burst());
+                assert!(
+                    !composer.handle_paste_burst_flush(now + PasteBurst::recommended_flush_delay())
+                );
+                assert_eq!(composer.draft.textarea.text(), "");
+            }
+        }
+    }
+
     /// Behavior: the first fast ASCII character is held briefly to avoid flicker; if no burst
     /// follows, it should eventually flush as normal typed input (not as a paste).
     #[test]
@@ -11910,8 +12434,16 @@ mod tests {
         );
 
         let count = LARGE_PASTE_CHAR_THRESHOLD; // 1000 in current config
-        let chars: Vec<char> = vec!['z'; count];
-        type_chars_humanlike(&mut composer, &chars);
+        let mut now = Instant::now();
+        let step = ChatComposer::recommended_paste_flush_delay();
+        for _ in 0..count {
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+                now,
+            );
+            now += step;
+            let _ = composer.handle_paste_burst_flush(now);
+        }
 
         assert_eq!(composer.draft.textarea.text(), "z".repeat(count));
         assert!(composer.draft.pending_pastes.is_empty());

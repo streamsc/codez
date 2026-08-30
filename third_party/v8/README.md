@@ -7,6 +7,11 @@ from the upstream `openai/codex` release. The release workflow resolves the
 crate version from `codex-rs/Cargo.lock` and configures both files through
 `.github/actions/setup-rusty-v8`.
 
+Current pinned versions:
+
+- Rust crate: `v8 = =150.4.0` (`rusty-v8-v150.4.0` release assets)
+- Embedded upstream V8 source for Bazel-produced release builds: `15.0.245.2`
+
 Bazel builds select their source-built archives and bindings through
 `MODULE.bazel`. When the pinned `v8` version changes, update and validate those
 entries with:

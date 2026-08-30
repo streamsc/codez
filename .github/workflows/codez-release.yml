@@ -46,6 +46,7 @@ jobs:
     env:
       ARCHIVE: codez-package-${{ matrix.target }}.tar.gz
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       SCCACHE_CACHE_SIZE: 2G
       TARGET: ${{ matrix.target }}
       USE_SCCACHE: ${{ matrix.use_sccache }}

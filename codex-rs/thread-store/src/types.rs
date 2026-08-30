@@ -4,6 +4,8 @@ use std::sync::Arc;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::CodexErrorInfo;
+use codex_app_server_protocol::ThreadTimelineEntry;
+use codex_protocol::SanitizedGitUrl;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -15,12 +17,12 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_rollout::RolloutItem;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -198,6 +200,15 @@ pub struct PrepareForkParams {
     pub boundary: ForkBoundary,
 }
 
+/// Parameters for reverting a paginated thread's durable history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertThreadParams {
+    /// Stable logical thread to revert.
+    pub thread_id: ThreadId,
+    /// First turn excluded from the retained history.
+    pub before_turn_id: String,
+}
+
 /// Frozen source history and model context for a reference-backed fork.
 #[derive(Debug)]
 pub struct PreparedFork {
@@ -260,6 +271,8 @@ pub enum ThreadSortKey {
     UpdatedAt,
     /// Sort by the thread's product recency timestamp.
     RecencyAt,
+    /// Sort by the thread's persisted position within its section.
+    SectionPosition,
 }
 
 /// The direction to use when listing stored threads.
@@ -300,8 +313,12 @@ pub struct ListThreadsParams {
     /// Optional cwd filters. `None` means all working directories, while an empty vector matches no
     /// threads.
     pub cwd_filters: Option<Vec<PathBuf>>,
-    /// Optional persisted pin-state filter.
-    pub is_pinned: Option<bool>,
+    /// Omit to include every section, set to `None` to match unsectioned
+    /// threads, or provide a section ID to match that section.
+    pub section: Option<Option<String>>,
+    /// Omit to include every project, set to None for unassigned threads,
+    /// or provide a project ID to match that project.
+    pub project_id: ClearableField<String>,
     /// Whether archived threads should be listed instead of active threads.
     pub archived: bool,
     /// Optional substring/full-text search term for thread title/preview.
@@ -495,6 +512,22 @@ pub struct ItemPage {
     pub backwards_cursor: Option<String>,
 }
 
+/// Parameters for reading a bounded mixed thread timeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListTimelineParams {
+    pub thread_id: ThreadId,
+    pub cursor: Option<String>,
+    pub page_size: usize,
+}
+
+/// Ordinary items, realtime facts, and the session state preceding their page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimelinePage {
+    pub items: Vec<ThreadTimelineEntry>,
+    pub next_cursor: Option<String>,
+    pub active_realtime_session_at_page_start: Option<String>,
+}
+
 /// Parameters for searching visible message occurrences within one paginated thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchThreadOccurrencesParams {
@@ -564,8 +597,17 @@ pub struct StoredThread {
     pub recency_at: DateTime<Utc>,
     /// Thread archive timestamp, if archived.
     pub archived_at: Option<DateTime<Utc>>,
-    /// Whether this thread has been pinned by the user.
-    pub is_pinned: bool,
+    /// The user-selected section for this thread, if any.
+    pub section: Option<codex_state::ThreadSection>,
+    /// The server-owned ordering position within the thread's section.
+    #[serde(default)]
+    pub section_position: Option<i64>,
+    /// The time when the thread most recently entered its current section.
+    #[serde(default)]
+    pub section_entered_at: Option<DateTime<Utc>>,
+    /// Canonical project assignment owned by app-server, if any.
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// Working directory captured for the thread.
     pub cwd: PathBuf,
     /// CLI version captured for the thread.
@@ -622,7 +664,7 @@ pub struct GitInfoPatch {
         skip_serializing_if = "Option::is_none",
         with = "optional_option"
     )]
-    pub origin_url: ClearableField<String>,
+    pub origin_url: ClearableField<SanitizedGitUrl>,
 }
 
 impl GitInfoPatch {
@@ -722,12 +764,17 @@ pub struct ThreadMetadataPatch {
     pub token_usage: Option<TokenUsage>,
     /// First user message observed for this thread.
     pub first_user_message: Option<String>,
-    /// Replacement user-selected thread pin state.
-    pub is_pinned: Option<bool>,
     /// Git metadata patch.
     pub git_info: Option<GitInfoPatch>,
     /// Thread memory behavior.
     pub memory_mode: Option<MemoryMode>,
+    /// Initial project assignment supplied with thread creation.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_option"
+    )]
+    pub project_id: ClearableField<String>,
 }
 
 impl ThreadMetadataPatch {
@@ -800,9 +847,6 @@ impl ThreadMetadataPatch {
         if next.first_user_message.is_some() {
             self.first_user_message = next.first_user_message;
         }
-        if next.is_pinned.is_some() {
-            self.is_pinned = next.is_pinned;
-        }
         if let Some(git_info) = next.git_info {
             self.git_info
                 .get_or_insert_with(GitInfoPatch::default)
@@ -810,6 +854,9 @@ impl ThreadMetadataPatch {
         }
         if next.memory_mode.is_some() {
             self.memory_mode = next.memory_mode;
+        }
+        if next.project_id.is_some() {
+            self.project_id = next.project_id;
         }
     }
 
@@ -835,9 +882,9 @@ impl ThreadMetadataPatch {
             && self.permission_profile.is_none()
             && self.token_usage.is_none()
             && self.first_user_message.is_none()
-            && self.is_pinned.is_none()
             && self.git_info.is_none()
             && self.memory_mode.is_none()
+            && self.project_id.is_none()
     }
 }
 
@@ -850,6 +897,17 @@ pub struct UpdateThreadMetadataParams {
     pub patch: ThreadMetadataPatch,
     /// Whether archived threads are eligible.
     pub include_archived: bool,
+}
+
+/// Parameters for moving a thread to, within, or out of a server-ordered section.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveThreadToSectionParams {
+    /// Thread to move.
+    pub thread_id: ThreadId,
+    /// Destination section, or `None` to remove the thread from its section.
+    pub section: Option<String>,
+    /// Existing section member to insert before, or `None` to append.
+    pub before_thread_id: Option<ThreadId>,
 }
 
 /// Parameters for archiving or unarchiving a thread.
@@ -977,7 +1035,6 @@ mod tests {
         let mut current = ThreadMetadataPatch {
             name: Some(Some("old name".to_string())),
             preview: Some("old preview".to_string()),
-            is_pinned: Some(true),
             git_info: Some(GitInfoPatch {
                 sha: Some(Some("abc123".to_string())),
                 branch: Some(Some("main".to_string())),
@@ -990,7 +1047,6 @@ mod tests {
             name: Some(None),
             preview: None,
             title: Some("new title".to_string()),
-            is_pinned: Some(false),
             git_info: Some(GitInfoPatch {
                 sha: None,
                 branch: Some(Some("feature".to_string())),
@@ -1002,7 +1058,6 @@ mod tests {
         assert_eq!(current.name, Some(None));
         assert_eq!(current.preview.as_deref(), Some("old preview"));
         assert_eq!(current.title.as_deref(), Some("new title"));
-        assert_eq!(current.is_pinned, Some(false));
         assert_eq!(
             current.git_info,
             Some(GitInfoPatch {

@@ -1,0 +1,70 @@
+---
+source: tui/src/startup_draft_tests.rs
+expression: "snapshots.join(\"\\n---\\n\")"
+---
+empty (48 columns):
+╭───────────────────────────────────────╮
+│ >_ Codez (v<VERSION>)                   │
+│                                       │
+│ model:     loading   /model to change │
+│ directory: loading                    │
+╰───────────────────────────────────────╯
+
+
+› Ask Codez to do anything
+
+  ? for shortcuts
+---
+resuming (48 columns):
+╭───────────────────────────────────────╮
+│ >_ Codez (v<VERSION>)                   │
+│                                       │
+│ model:     loading   /model to change │
+│ directory: loading                    │
+╰───────────────────────────────────────╯
+  Resuming session…
+
+› Ask Codez to do anything
+
+  ? for shortcuts
+---
+forking (48 columns):
+╭───────────────────────────────────────╮
+│ >_ Codez (v<VERSION>)                   │
+│                                       │
+│ model:     loading   /model to change │
+│ directory: loading                    │
+╰───────────────────────────────────────╯
+  Forking session…
+
+› draft while loading
+
+
+---
+multiline (48 columns):
+╭───────────────────────────────────────╮
+│ >_ Codez (v<VERSION>)                   │
+│                                       │
+│ model:     loading   /model to change │
+│ directory: loading                    │
+╰───────────────────────────────────────╯
+
+
+› first startup line
+  second startup line
+
+
+---
+narrow (18 columns):
+╭────────────────╮
+│ >_ Codez (v0.… │
+│                │
+│ model:     lo… │
+│ directory: …ng │
+╰────────────────╯
+
+
+› first startup
+  line
+  second startup
+  line

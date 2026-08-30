@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
 expression: rendered
 ---
 ╭─────────────────────────────────────╮
-│ >_ Codez (v0.146.1)                 │
+│ >_ Codez (v0.151.0)                 │
 │                                     │
 │ model:     gpt-5   /model to change │
 │ directory: /tmp/project             │

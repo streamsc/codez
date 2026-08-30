@@ -1308,7 +1308,8 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
+            project_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
             cwd: None,
@@ -1759,6 +1760,7 @@ impl CodexClient {
                             .collect(),
                     ),
                     mcp_server_openai_form_elicitation: false,
+                    extensions: None,
                 }),
             },
         };
@@ -2166,6 +2168,7 @@ impl CodexClient {
         params: CommandExecutionRequestApprovalParams,
     ) -> Result<()> {
         let CommandExecutionRequestApprovalParams {
+            kind: _,
             thread_id,
             turn_id,
             item_id,
