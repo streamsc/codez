@@ -29,7 +29,7 @@ pub(crate) fn managed_codex_bin(codex_home: &Path) -> PathBuf {
 pub(crate) async fn resolved_managed_codex_bin(codex_bin: &Path) -> Result<PathBuf> {
     fs::canonicalize(codex_bin).await.with_context(|| {
         format!(
-            "failed to resolve managed Codex binary {}",
+            "failed to resolve managed Codez binary {}",
             codex_bin.display()
         )
     })
@@ -43,13 +43,13 @@ pub(crate) async fn managed_codex_version(codex_bin: &Path) -> Result<String> {
         .await
         .with_context(|| {
             format!(
-                "failed to invoke managed Codex binary {}",
+                "failed to invoke managed Codez binary {}",
                 codex_bin.display()
             )
         })?;
     if !output.status.success() {
         return Err(anyhow!(
-            "managed Codex binary {} exited with status {}",
+            "managed Codez binary {} exited with status {}",
             codex_bin.display(),
             output.status
         ));
@@ -57,7 +57,7 @@ pub(crate) async fn managed_codex_version(codex_bin: &Path) -> Result<String> {
 
     let stdout = String::from_utf8(output.stdout).with_context(|| {
         format!(
-            "managed Codex version was not utf-8: {}",
+            "managed Codez version was not utf-8: {}",
             codex_bin.display()
         )
     })?;
@@ -95,7 +95,7 @@ fn parse_codex_version(output: &str) -> Result<String> {
         .split_whitespace()
         .nth(1)
         .filter(|version| !version.is_empty())
-        .ok_or_else(|| anyhow!("managed Codex version output was malformed"))?;
+        .ok_or_else(|| anyhow!("managed Codez version output was malformed"))?;
     Ok(version.to_string())
 }
 

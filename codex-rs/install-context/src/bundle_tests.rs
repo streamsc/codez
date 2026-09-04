@@ -7,7 +7,7 @@ use std::fs;
 #[test]
 fn bundle_executable_preserves_package_layout_and_install_method() -> std::io::Result<()> {
     let home = tempfile::tempdir()?;
-    let package = home.path().join("packages/standalone/releases/test");
+    let package = home.path().join("packages/codez/releases/test");
     let executable = package.join("CodexCLI.app/Contents/MacOS/codex");
     fs::create_dir_all(executable.parent().unwrap())?;
     fs::write(&executable, "")?;

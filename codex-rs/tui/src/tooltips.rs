@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use rand::Rng;
 
 const ANNOUNCEMENT_TIP_URL: &str =
-    "https://raw.githubusercontent.com/openai/codex/main/announcement_tip.toml";
+    "https://raw.githubusercontent.com/streamsc/codez/codez/announcement_tip.toml";
 
 const IS_MACOS: bool = cfg!(target_os = "macos");
 const IS_WINDOWS: bool = cfg!(target_os = "windows");
@@ -362,6 +362,14 @@ mod tests {
     fn random_tooltip_returns_some_tip_when_available() {
         let mut rng = StdRng::seed_from_u64(42);
         assert!(pick_tooltip(&mut rng).is_some());
+    }
+
+    #[test]
+    fn announcement_source_is_codez_owned() {
+        assert_eq!(
+            ANNOUNCEMENT_TIP_URL,
+            "https://raw.githubusercontent.com/streamsc/codez/codez/announcement_tip.toml"
+        );
     }
 
     #[test]

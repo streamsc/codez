@@ -166,7 +166,7 @@ impl ChatWidget {
                 match &ev.action {
                     GuardianAssessmentAction::WriteStdin { .. } => {
                         history_cell::new_guardian_timed_out_action_request(format!(
-                            "codex could {}",
+                            "Codez could {}",
                             auto_review_denials::action_summary(&ev.action)
                         ))
                     }
@@ -216,7 +216,7 @@ impl ChatWidget {
             match &ev.action {
                 GuardianAssessmentAction::WriteStdin { .. } => {
                     history_cell::new_guardian_denied_action_request(format!(
-                        "codex to {}",
+                        "Codez to {}",
                         auto_review_denials::action_summary(&ev.action)
                     ))
                 }
