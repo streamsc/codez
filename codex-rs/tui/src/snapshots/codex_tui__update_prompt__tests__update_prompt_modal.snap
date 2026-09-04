@@ -2,11 +2,14 @@
 source: tui/src/update_prompt.rs
 expression: terminal.backend()
 ---
-  ✨ Update available! 0.144.4 -> 9.9.9
+
+  ✨ Update available! 0.153.2-r1 -> 9.9.9
 
   Release notes: https://github.com/streamsc/codez/releases/latest
 
-› 1. Update now (runs `npm install -g @openai/codex@latest`)                    
+› 1. Update now (runs `sh -c 'curl -fsSL                                        
+     https://github.com/streamsc/codez/releases/latest/download/install-codez.sh
+     | CODEX_NON_INTERACTIVE=1 sh'`)                                            
   2. Skip
   3. Skip until next version
 

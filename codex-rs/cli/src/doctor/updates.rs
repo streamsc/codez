@@ -432,9 +432,11 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
 
 fn update_action_label(context: &InstallContext) -> &'static str {
     match &context.method {
-        InstallMethod::Npm | InstallMethod::Bun | InstallMethod::Pnpm | InstallMethod::Brew => {
-            "unsupported Codez package manager"
-        }
+        InstallMethod::Npm
+        | InstallMethod::Bun
+        | InstallMethod::VitePlus
+        | InstallMethod::Pnpm
+        | InstallMethod::Brew => "unsupported Codez package manager",
         InstallMethod::Standalone { .. } => "standalone installer",
         InstallMethod::Other => "manual or unknown",
     }
@@ -444,6 +446,7 @@ fn fetch_latest_version(context: &InstallContext) -> Result<String, String> {
     match &context.method {
         InstallMethod::Npm
         | InstallMethod::Bun
+        | InstallMethod::VitePlus
         | InstallMethod::Pnpm
         | InstallMethod::Brew
         | InstallMethod::Standalone { .. }
@@ -636,6 +639,13 @@ mod tests {
         assert_eq!(
             update_action_label(&InstallContext {
                 method: InstallMethod::Npm,
+                package_layout: None,
+            }),
+            "unsupported Codez package manager"
+        );
+        assert_eq!(
+            update_action_label(&InstallContext {
+                method: InstallMethod::VitePlus,
                 package_layout: None,
             }),
             "unsupported Codez package manager"

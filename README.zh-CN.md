@@ -30,7 +30,7 @@ codez
 
 - `CODEX_HOME` 用于指定共享的配置和会话目录（默认为 `~/.codex`）。
 - `CODEX_INSTALL_DIR` 用于指定公共命令目录（默认为 `~/.local/bin`）。
-- `CODEX_RELEASE` 用于固定安装特定版本，例如 `codez-v0.151.0-r1`。
+- `CODEX_RELEASE` 用于固定安装特定版本，例如 `codez-v0.153.2-r1`。
 
 ### 离线安装
 
@@ -43,9 +43,9 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c codez-offline-bundle_SHA256SUMS
 fi
-tar -xzf codez-offline-v0.151.0-r1.tar.gz
-./codez-offline-v0.151.0-r1/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.151.0-r1
+tar -xzf codez-offline-v0.153.2-r1.tar.gz
+./codez-offline-v0.153.2-r1/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.153.2-r1
 ```
 
 离线安装程序会选择对应的 macOS 或 Linux x86_64/ARM64 软件包，
@@ -56,8 +56,8 @@ tar -xzf codez-offline-v0.151.0-r1.tar.gz
 可传入完整 API 根地址和 API Key：
 
 ```shell
-./codez-offline-v0.151.0-r1/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.151.0-r1 \
+./codez-offline-v0.153.2-r1/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.153.2-r1 \
   --api-base-url https://gateway.internal/v1 \
   --api-key sk-internal \
   --model internal-model
@@ -110,7 +110,7 @@ cargo build --bin codex --bin codex-code-mode-host
 构建 Codez 软件包目录结构时，请选择 Codez 软件包变体：
 
 ```shell
-CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.151.0-r1 python3 scripts/build_codex_package.py \
+CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.153.2-r1 python3 scripts/build_codex_package.py \
   --variant codez \
   --target x86_64-apple-darwin \
   --cargo-profile release \
@@ -127,7 +127,7 @@ cargo build --target "$TARGET" --release --bin bwrap
 strip --strip-debug --strip-unneeded "target/$TARGET/release/bwrap"
 export CODEX_BWRAP_SHA256="$(sha256sum "target/$TARGET/release/bwrap" | awk '{print $1}')"
 cd ..
-CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.151.0-r1 python3 scripts/build_codex_package.py \
+CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.153.2-r1 python3 scripts/build_codex_package.py \
   --variant codez \
   --target "$TARGET" \
   --cargo-profile release \
@@ -136,7 +136,7 @@ CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.151.0-r1 python3 scripts/build_codex_pack
   --archive-output "dist/codez-package-$TARGET.tar.gz"
 ```
 
-标签格式为 `codez-v<上游版本>-r<N>`，例如 `codez-v0.151.0-r1`。发布工作流会构建四个平台的软件包，
+标签格式为 `codez-v<上游版本>-r<N>`，例如 `codez-v0.153.2-r1`。发布工作流会构建四个平台的软件包，
 发布统一的校验和清单，并在不同运行之间缓存 Cargo 依赖和编译器输出。上游升级会先通过 PR 审核和合并，
 再创建发布标签。
 

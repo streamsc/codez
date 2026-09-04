@@ -24,7 +24,7 @@ The installer accepts the existing Codex environment controls:
 
 - `CODEX_HOME` selects the shared configuration and session directory (default `~/.codex`).
 - `CODEX_INSTALL_DIR` selects the public command directory (default `~/.local/bin`).
-- `CODEX_RELEASE` pins a release such as `codez-v0.151.0-r1`.
+- `CODEX_RELEASE` pins a release such as `codez-v0.153.2-r1`.
 
 ### Offline install
 
@@ -38,9 +38,9 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   shasum -a 256 -c codez-offline-bundle_SHA256SUMS
 fi
-tar -xzf codez-offline-v0.151.0-r1.tar.gz
-./codez-offline-v0.151.0-r1/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.151.0-r1
+tar -xzf codez-offline-v0.153.2-r1.tar.gz
+./codez-offline-v0.153.2-r1/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.153.2-r1
 ```
 
 The offline installer selects the matching macOS or Linux x86_64/ARM64 package,
@@ -52,8 +52,8 @@ To configure the installed Codez for an internal OpenAI-compatible Responses
 API and skip the first-run login screen, provide the full API root and API key:
 
 ```shell
-./codez-offline-v0.151.0-r1/install-codez-offline.sh \
-  --bundle ./codez-offline-v0.151.0-r1 \
+./codez-offline-v0.153.2-r1/install-codez-offline.sh \
+  --bundle ./codez-offline-v0.153.2-r1 \
   --api-base-url https://gateway.internal/v1 \
   --api-key sk-internal \
   --model internal-model
@@ -110,7 +110,7 @@ cargo build --bin codex --bin codex-code-mode-host
 Build the Codez package layout by selecting the Codez package variant:
 
 ```shell
-CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.151.0-r1 python3 scripts/build_codex_package.py \
+CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.153.2-r1 python3 scripts/build_codex_package.py \
   --variant codez \
   --target x86_64-apple-darwin \
   --cargo-profile release \
@@ -127,7 +127,7 @@ cargo build --target "$TARGET" --release --bin bwrap
 strip --strip-debug --strip-unneeded "target/$TARGET/release/bwrap"
 export CODEX_BWRAP_SHA256="$(sha256sum "target/$TARGET/release/bwrap" | awk '{print $1}')"
 cd ..
-CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.151.0-r1 python3 scripts/build_codex_package.py \
+CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.153.2-r1 python3 scripts/build_codex_package.py \
   --variant codez \
   --target "$TARGET" \
   --cargo-profile release \
@@ -136,7 +136,7 @@ CODEX_REPO_ROOT="$PWD" CODEZ_VERSION=0.151.0-r1 python3 scripts/build_codex_pack
   --archive-output "dist/codez-package-$TARGET.tar.gz"
 ```
 
-Tags use `codez-v<upstream-version>-r<N>`, for example `codez-v0.151.0-r1`. The release workflow builds all four platform archives, publishes one checksum manifest, and caches Cargo dependencies and compiler outputs between runs. Upstream upgrades are reviewed and merged through pull requests before a release tag is created.
+Tags use `codez-v<upstream-version>-r<N>`, for example `codez-v0.153.2-r1`. The release workflow builds all four platform archives, publishes one checksum manifest, and caches Cargo dependencies and compiler outputs between runs. Upstream upgrades are reviewed and merged through pull requests before a release tag is created.
 
 ## Upstream documentation
 
