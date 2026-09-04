@@ -12,11 +12,13 @@ pub enum UpdateAction {
     NpmGlobalLatest,
     /// Update via `bun install -g @openai/codex@latest`.
     BunGlobalLatest,
+    /// Update via `vp install -g @openai/codex@latest`.
+    VitePlusGlobalLatest,
     /// Update via `pnpm add -g @openai/codex@latest`.
     PnpmGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
-    /// Update via the latest Codez standalone installer release asset.
+    /// Update via `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`.
     StandaloneUnix,
     /// Update via `$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex`.
     StandaloneWindows,
@@ -26,19 +28,16 @@ impl UpdateAction {
     #[cfg(any(not(debug_assertions), test))]
     pub(crate) fn from_install_context(context: &InstallContext) -> Option<Self> {
         match &context.method {
-            InstallMethod::Standalone {
-                platform: StandalonePlatform::Unix,
-                ..
-            } => Some(UpdateAction::StandaloneUnix),
-            InstallMethod::Npm
-            | InstallMethod::Bun
-            | InstallMethod::Pnpm
-            | InstallMethod::Brew
-            | InstallMethod::Standalone {
-                platform: StandalonePlatform::Windows,
-                ..
-            }
-            | InstallMethod::Other => None,
+            InstallMethod::Npm => Some(UpdateAction::NpmGlobalLatest),
+            InstallMethod::Bun => Some(UpdateAction::BunGlobalLatest),
+            InstallMethod::VitePlus => Some(UpdateAction::VitePlusGlobalLatest),
+            InstallMethod::Pnpm => Some(UpdateAction::PnpmGlobalLatest),
+            InstallMethod::Brew => Some(UpdateAction::BrewUpgrade),
+            InstallMethod::Standalone { platform, .. } => Some(match platform {
+                StandalonePlatform::Unix => UpdateAction::StandaloneUnix,
+                StandalonePlatform::Windows => UpdateAction::StandaloneWindows,
+            }),
+            InstallMethod::Other => None,
         }
     }
 
@@ -47,13 +46,14 @@ impl UpdateAction {
         match self {
             UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex"]),
             UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex"]),
+            UpdateAction::VitePlusGlobalLatest => ("vp", &["install", "-g", "@openai/codex"]),
             UpdateAction::PnpmGlobalLatest => ("pnpm", &["add", "-g", "@openai/codex"]),
             UpdateAction::BrewUpgrade => ("brew", &["upgrade", "--cask", "codex"]),
             UpdateAction::StandaloneUnix => (
                 "sh",
                 &[
                     "-c",
-                    "curl -fsSL https://github.com/streamsc/codez/releases/latest/download/install-codez.sh | CODEX_NON_INTERACTIVE=1 sh",
+                    "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
                 ],
             ),
             UpdateAction::StandaloneWindows => (
@@ -105,28 +105,28 @@ mod tests {
                 method: InstallMethod::Npm,
                 package_layout: None,
             }),
-            None
+            Some(UpdateAction::NpmGlobalLatest)
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
                 method: InstallMethod::Bun,
                 package_layout: None,
             }),
-            None
+            Some(UpdateAction::BunGlobalLatest)
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
                 method: InstallMethod::Pnpm,
                 package_layout: None,
             }),
-            None
+            Some(UpdateAction::PnpmGlobalLatest)
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
                 method: InstallMethod::Brew,
                 package_layout: None,
             }),
-            None
+            Some(UpdateAction::BrewUpgrade)
         );
         assert_eq!(
             UpdateAction::from_install_context(&InstallContext {
@@ -148,7 +148,7 @@ mod tests {
                 },
                 package_layout: None,
             }),
-            None
+            Some(UpdateAction::StandaloneWindows)
         );
     }
 
@@ -160,7 +160,7 @@ mod tests {
                 "sh",
                 &[
                     "-c",
-                    "curl -fsSL https://github.com/streamsc/codez/releases/latest/download/install-codez.sh | CODEX_NON_INTERACTIVE=1 sh"
+                    "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
                 ][..],
             )
         );

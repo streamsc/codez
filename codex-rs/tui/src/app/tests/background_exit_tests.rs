@@ -52,7 +52,7 @@ async fn remote_disconnect_exit_summary_does_not_require_a_local_rollout_or_prin
 #[tokio::test]
 async fn embedded_exit_keeps_the_session_summary() {
     let (mut app, _, _) = make_test_app_with_channels().await;
-    prepare_local_daemon_thread(&mut app).unwrap();
+    let thread_id = prepare_local_daemon_thread(&mut app).unwrap();
     app.app_server_target = AppServerTarget::Embedded;
     let mut exit_info = app.exit_info(ExitReason::UserRequested);
     exit_info.token_usage = TokenUsage {
@@ -60,14 +60,19 @@ async fn embedded_exit_keeps_the_session_summary() {
         total_tokens: 2,
         ..Default::default()
     };
-    exit_info.resume_hint = Some("codez resume THREAD_ID".to_string());
-    assert_eq!(
-        exit_info.format_exit_messages(/*color_enabled*/ false),
-        vec![
-            "Token usage: total=2 input=0 output=2",
-            "To continue this session, run codez resume THREAD_ID",
-        ]
-    );
+    exit_info.resume_hint = Some(ResumableThread {
+        thread_id,
+        thread_name: None,
+    });
+    let output = exit_info
+        .format_exit_messages(/*color_enabled*/ false)
+        .join("\n")
+        .replace(&thread_id.to_string(), "THREAD_ID");
+    assert_snapshot!(output, @"
+    Token usage: total=2 input=0 output=2
+    To continue this session, run:
+      codex resume THREAD_ID
+    ");
 }
 
 fn prepare_local_daemon_thread(app: &mut App) -> Result<ThreadId> {
@@ -133,9 +138,9 @@ async fn daemon_ctrl_c_shows_background_exit_menu_and_escape_dismisses_it() -> R
       Task is still running
       Choose what happens to the current task.
 
-    › 1. Cancel task        Stop the current task and stay in Codez
-      2. Run in background  Exit Codez and leave the task running
-      3. Exit               Stop the current task and exit Codez
+    › 1. Cancel task        Stop the current task and stay in Codex
+      2. Run in background  Exit Codex and leave the task running
+      3. Exit               Stop the current task and exit Codex
 
       Press enter to confirm or esc to go back
     ");
@@ -367,8 +372,8 @@ async fn daemon_ctrl_c_hides_background_exit_for_running_background_side_thread(
       Task is still running
       Choose what happens to the current task.
 
-    › 1. Cancel task  Stop the current task and stay in Codez
-      2. Exit         Stop the current task and exit Codez
+    › 1. Cancel task  Stop the current task and stay in Codex
+      2. Exit         Stop the current task and exit Codex
 
       Press enter to confirm or esc to go back
     ");
