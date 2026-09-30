@@ -149,6 +149,85 @@ class InstallCodezShTest(unittest.TestCase):
                 result.stderr,
             )
 
+    def test_daemon_selection_and_update_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = root / "release"
+            fake_bin = root / "fake-bin"
+            release.mkdir()
+            fake_bin.mkdir()
+            target = "x86_64-unknown-linux-musl"
+            self._write_release(release, target, is_linux=True)
+            self._write_fake_commands(fake_bin)
+            home = root / "home"
+            public = root / "bin"
+            env = self._environment(fake_bin, home, public, release, "Linux", "x86_64")
+            env["CODEX_INSTALL_DAEMON_ONLY"] = "1"
+            package = home / "packages/codez-app-server-daemon"
+            release_name = f"{TAG.removeprefix('codez-v')}-{target}"
+
+            def install(**updates: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [str(INSTALLER)],
+                    env={**env, **updates},
+                    capture_output=True,
+                    text=True,
+                )
+
+            pending = install(CODEX_INSTALL_DEFER_SELECTION="1")
+            self.assertEqual(pending.returncode, 0, pending.stderr)
+            self.assertFalse((package / "current").exists())
+            self.assertTrue((package / ".migration-current/bin/codez").is_file())
+            self.assertEqual(
+                (package / "auto-update-version").read_text(), release_name
+            )
+            self.assertFalse((public / "codez").exists())
+            (package / ".migration-current").rename(package / "current")
+
+            # Rust prepare_install seeds daemon packages with this root alias.
+            alias = package / "current/codez"
+            alias.unlink(missing_ok=True)
+            alias.symlink_to("bin/codez")
+            binary_inode = (package / "current/bin/codez").stat().st_ino
+            seeded = install(
+                CODEX_INSTALL_IF_LATEST="1", CODEX_UPDATE_FROM_RELEASE=release_name
+            )
+            self.assertEqual(seeded.returncode, 0, seeded.stderr)
+            self.assertEqual(
+                (package / "current/bin/codez").stat().st_ino, binary_inode
+            )
+            self.assertEqual(os.readlink(alias), "bin/codez")
+
+            changed = install(
+                CODEX_INSTALL_IF_CURRENT="1", CODEX_UPDATE_FROM_RELEASE="stale"
+            )
+            self.assertNotEqual(changed.returncode, 0)
+            self.assertIn("Daemon selection changed", changed.stderr)
+            scheduled = install(
+                CODEX_INSTALL_IF_LATEST="1", CODEX_UPDATE_FROM_RELEASE="stale"
+            )
+            self.assertEqual(scheduled.returncode, 0, scheduled.stderr)
+            self.assertNotIn("Downloading", scheduled.stdout)
+            repeated = install(CODEX_INSTALL_DEFER_SELECTION="1")
+            self.assertNotEqual(repeated.returncode, 0)
+
+            pinned = install(CODEX_RELEASE=TAG)
+            self.assertEqual(pinned.returncode, 0, pinned.stderr)
+            self.assertFalse((package / "auto-update-version").exists())
+            skipped = install(
+                CODEX_INSTALL_IF_LATEST="1", CODEX_UPDATE_FROM_RELEASE=release_name
+            )
+            self.assertEqual(skipped.returncode, 0, skipped.stderr)
+            self.assertNotIn("Downloading", skipped.stdout)
+            explicit = install(
+                CODEX_INSTALL_IF_CURRENT="1", CODEX_UPDATE_FROM_RELEASE=release_name
+            )
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
+            self.assertEqual(
+                (package / "auto-update-version").read_text(), release_name
+            )
+            self.assertFalse((public / "codez").exists())
+
     def _write_release(
         self,
         release_dir: Path,

@@ -64,7 +64,7 @@ struct ReleaseInfo {
 
 async fn check_for_update(
     version_file: &Path,
-    _action: Option<UpdateAction>,
+    action: Option<UpdateAction>,
     http_client_factory: HttpClientFactory,
 ) -> anyhow::Result<()> {
     let client_pool = RouteAwareClientPool::with_chatgpt_cloudflare_cookies(
@@ -72,6 +72,9 @@ async fn check_for_update(
         ClientRouteClass::Other,
     )
     .with_legacy_custom_ca_fallback();
+    if matches!(action, Some(UpdateAction::Daemon(_))) {
+        return Ok(());
+    }
     let latest_version = fetch_latest_github_release_version(&client_pool).await?;
 
     // Preserve any previously dismissed version if present.

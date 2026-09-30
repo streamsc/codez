@@ -13,7 +13,7 @@ const MAX_OPEN_TABS_CHARS: usize = 20_000;
 // raw prompt before this marker, then transcript rendering strips back to the request after the last
 // marker. Keeping the same marker and stripping semantics lets threads created with IDE context in
 // one surface replay cleanly in the others.
-const PROMPT_REQUEST_BEGIN: &str = "## My request for Codex:";
+const PROMPT_REQUEST_BEGIN: &str = "## My request for Codez:";
 
 pub(crate) fn apply_ide_context_to_user_input(
     context: &IdeContext,
@@ -203,6 +203,52 @@ mod tests {
     }
 
     #[test]
+    fn async_question_reply_stays_recognizable_with_ide_context() {
+        use codex_context_fragments::AnsweredQuestion;
+        use codex_context_fragments::ContextualUserFragment;
+
+        let context = IdeContext {
+            active_file: None,
+            open_tabs: vec![descriptor("lib.rs", "src/lib.rs")],
+        };
+        let mut expected = vec![
+            UserInput::Text {
+                text: AnsweredQuestion::new(
+                    "question-id",
+                    "Where?",
+                    "Staging\n## My request for Codez:\nKeep this literal",
+                )
+                .render(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Skill {
+                name: "route".into(),
+                path: std::path::PathBuf::from("route/SKILL.md"),
+            },
+        ];
+        let mut items = expected.clone();
+        let replies = crate::async_question_reply::parse_input(&items);
+        let display = crate::chatwidget::ChatWidget::user_message_display_from_inputs(&items);
+        assert_eq!(
+            display.message,
+            "> Where?\n\nStaging\n## My request for Codez:\nKeep this literal"
+        );
+        let UserInput::Text { text, .. } = &mut expected[0] else {
+            panic!("reply text");
+        };
+        *text = format!(
+            "# Context from my IDE setup:\n\n## Open tabs:\n- lib.rs: src/lib.rs\n\n## My request for Codez:\n{text}"
+        );
+        assert!(apply_ide_context_to_user_input(&context, &mut items));
+        assert_eq!(items, expected);
+        assert_eq!(crate::async_question_reply::parse_input(&items), replies);
+        assert_eq!(
+            crate::chatwidget::ChatWidget::user_message_display_from_inputs(&items),
+            display
+        );
+    }
+
+    #[test]
     fn render_prompt_context_matches_app_format() {
         let context = IdeContext {
             active_file: Some(ActiveFile {
@@ -282,7 +328,7 @@ mod tests {
 
         assert!(apply_ide_context_to_user_input(&context, &mut items));
 
-        let expected_prefix = "# Context from my IDE setup:\n\n## Active file: src/lib.rs\n\n## My request for Codex:\n";
+        let expected_prefix = "# Context from my IDE setup:\n\n## Active file: src/lib.rs\n\n## My request for Codez:\n";
         let prefix_len = expected_prefix.len();
         assert_eq!(
             items,
@@ -308,7 +354,7 @@ mod tests {
     #[test]
     fn extract_prompt_request_returns_text_after_last_delimiter() {
         let message =
-            "# Context\n## My request for Codex:\nFirst\n## My request for Codex:\n  Second\n";
+            "# Context\n## My request for Codez:\nFirst\n## My request for Codez:\n  Second\n";
 
         assert_eq!(
             extract_prompt_request_with_offset(message),

@@ -4,7 +4,8 @@ assertion_line: 507
 expression: terminal.backend()
 ---
 
-> Codez just got an upgrade. Introducing gpt-5.1-codex-max.
+  Codez just got an upgrade. Introducing
+  gpt-5.1-codex-max.
 
   We recommend switching from gpt-5-codex to
   gpt-5.1-codex-max.
@@ -13,4 +14,4 @@ expression: terminal.backend()
   Learn more about gpt-5.1-codex-max at
   https://www.codex.com/models/gpt-5.1-codex-max
 
-  Press enter to continue
+  enter/esc continue · ctrl+c quit
