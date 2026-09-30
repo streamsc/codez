@@ -1,11 +1,8 @@
 ---
 source: tui/src/app/tests.rs
-assertion_line: 4013
+assertion_line: 5874
 expression: rendered
 ---
-╭─────────────────────────────────────────────╮
-│ >_ Codez (v<VERSION>)                       │
-│                                             │
-│ model:     gpt-test high   /model to change │
-│ directory: /tmp/project                     │
-╰─────────────────────────────────────────────╯
+
+  >_ Codez (v<VERSION>)
+     /tmp/project

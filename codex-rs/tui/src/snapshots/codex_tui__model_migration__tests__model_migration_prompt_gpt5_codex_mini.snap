@@ -4,7 +4,8 @@ assertion_line: 534
 expression: terminal.backend()
 ---
 
-> Codez just got an upgrade. Introducing gpt-5.1-codex-mini.
+  Codez just got an upgrade. Introducing
+  gpt-5.1-codex-mini.
 
   We recommend switching from gpt-5-codex-mini to
   gpt-5.1-codex-mini.
@@ -13,4 +14,4 @@ expression: terminal.backend()
   Learn more about gpt-5.1-codex-mini at
   https://www.codex.com/models/gpt-5.1-codex-mini
 
-  Press enter to continue
+  enter/esc continue · ctrl+c quit

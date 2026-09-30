@@ -36,6 +36,13 @@ jobs:
             || { echo "Tag upstream version ${upstream_version} != Cargo ${cargo_version}" >&2; exit 1; }
           echo "display=${upstream_version}-r${revision}" >> "$GITHUB_OUTPUT"
 
+      - name: Test release packaging and Codez installers
+        env:
+          CODEX_REPO_ROOT: ${{ github.workspace }}
+        run: |
+          python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
+          python3 -m unittest discover -s scripts/install -p 'test_*codez*.py'
+
   build:
     needs: tag-check
     name: Build ${{ matrix.target }}
@@ -217,6 +224,7 @@ jobs:
           mkdir -p dist
           python3 scripts/build_codex_package.py \
             --variant codez \
+            --package-version "${CODEZ_VERSION}" \
             --target "${TARGET}" \
             --cargo-profile release \
             --package-dir "dist/codez-package-${TARGET}" \
@@ -326,7 +334,7 @@ jobs:
             sha256sum "codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz" > codez-offline-bundle_SHA256SUMS
           )
 
-      - name: Publish unsigned GitHub release
+      - name: Stage unsigned GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -344,4 +352,5 @@ jobs:
             dist/install-codez-offline.sh \
             --title "Codez ${{ needs.tag-check.outputs.display }}" \
             --generate-notes \
+            --draft \
             --verify-tag

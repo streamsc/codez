@@ -1,10 +1,10 @@
 ---
 source: tui/src/bottom_pane/list_selection_view.rs
-assertion_line: 1574
+assertion_line: 1878
 expression: render_lines(&view)
 ---
-                                                
   Select Approval Mode                          
+                                                
                                                 
 › 1. Read Only (current)  Codez can read files  
   2. Full Access          Codez can edit files  
