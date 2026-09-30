@@ -58,7 +58,7 @@ struct FakeInstallerHttp {
 #[tokio::test]
 async fn explicit_update_migrates_running_and_stopped_installations() {
     for (running, local) in [(false, false), (true, false), (false, true), (true, true)] {
-        let home = TempDir::new().unwrap();
+        let home = TempDir::new_in("/tmp").unwrap();
         let (legacy, release) = manual_update_daemon(&home);
         let root = home.path().join("packages/codez");
         if local {
@@ -231,7 +231,7 @@ impl InstallerHttp for FakeInstallerHttp {
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelling_installer_stops_children_and_releases_fallback_lock() {
-    let home = tempfile::TempDir::new().expect("home");
+    let home = tempfile::TempDir::new_in("/tmp").expect("home");
     let ready = home.path().join("ready");
     let delayed = home.path().join("delayed");
     let lock = home.path().join("packages/codez/install.lock.d");
@@ -307,7 +307,7 @@ fn manual_update_daemon(home: &TempDir) -> (Daemon, String) {
             update_pid_file: state.join("app-server-updater.pid"),
             operation_lock_file: state.join("daemon.lock"),
             settings_file: state.join("settings.json"),
-            managed_codex_bin: standalone.join("current/codex"),
+            managed_codex_bin: standalone.join("current/codez"),
         },
         release,
     )
@@ -325,7 +325,7 @@ async fn manual_request_retries_after_updater_replacement() {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    let home = TempDir::new().expect("home");
+    let home = TempDir::new_in("/tmp").expect("home");
     let (daemon, _) = manual_update_daemon(&home);
     let socket_path = daemon.manual_update_socket_path();
     codex_uds::prepare_private_socket_directory(socket_path.parent().expect("socket parent"))
@@ -378,7 +378,7 @@ async fn manual_request_retries_after_updater_replacement() {
 async fn manual_request_recovers_when_one_shot_updater_exits() {
     use tokio::io::AsyncReadExt;
 
-    let home = TempDir::new().expect("home");
+    let home = TempDir::new_in("/tmp").expect("home");
     let (daemon, _) = manual_update_daemon(&home);
     let socket_path = daemon.manual_update_socket_path();
     codex_uds::prepare_private_socket_directory(socket_path.parent().expect("socket parent"))
@@ -417,7 +417,7 @@ async fn unsupported_request_preserves_updater_schedule() {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    let home = TempDir::new().expect("home");
+    let home = TempDir::new_in("/tmp").expect("home");
     let (daemon, _) = manual_update_daemon(&home);
     let daemon = std::sync::Arc::new(daemon);
     let identity = executable_identity(&daemon.managed_codex_bin)
@@ -552,7 +552,7 @@ async fn daemon_start_and_restart_preserve_launch_features() {
             ("code_mode_host".to_string(), false),
         ]),
     ] {
-        let home = TempDir::new().unwrap();
+        let home = TempDir::new_in("/tmp").unwrap();
         let (daemon, _) = manual_update_daemon(&home);
         let args_path = home.path().join("launch-args");
         std::fs::write(
@@ -625,7 +625,7 @@ async fn confirmed_feature_restart_preserves_ownership_and_skips_matching_settin
     use std::collections::BTreeMap;
 
     for managed in [true, false] {
-        let home = TempDir::new().unwrap();
+        let home = TempDir::new_in("/tmp").unwrap();
         let (daemon, _) = manual_update_daemon(&home);
         std::fs::write(&daemon.settings_file,
             r#"{"featureOverrides":{"auth_elicitation":true,"api_key_model_discovery":true},"updater":{"autoUpdateEnabled":false},"shutdownGraceSeconds":0}"#
@@ -698,7 +698,7 @@ async fn check_manual_update_restart(package_directory: &str) {
     use tokio::io::AsyncWriteExt;
 
     let local_package = package_directory == "codez-app-server-daemon";
-    let home = TempDir::new().expect("home");
+    let home = TempDir::new_in("/tmp").expect("home");
     let (mut daemon, mut release) = manual_update_daemon(&home);
     let standalone = home.path().join("packages").join(package_directory);
     if local_package {
@@ -713,7 +713,7 @@ async fn check_manual_update_restart(package_directory: &str) {
         std::os::unix::fs::symlink(format!("releases/{local}"), standalone.join("current"))
             .unwrap();
         std::fs::remove_file(standalone.join("auto-update-version")).unwrap();
-        daemon.managed_codex_bin = standalone.join("current/codex");
+        daemon.managed_codex_bin = standalone.join("current/codez");
         release = local;
     }
     let daemon = std::sync::Arc::new(daemon);
@@ -749,7 +749,7 @@ async fn check_manual_update_restart(package_directory: &str) {
     let install_binary = if local_package {
         // Same binary and version, but a different package: it must still restart.
         format!(
-            "cp '{root}/releases/{release}/codex' '{root}/releases/{next}/bin/codez'",
+            "cp '{root}/releases/{release}/codez' '{root}/releases/{next}/bin/codez'",
             root = standalone.display()
         )
     } else {
@@ -918,7 +918,7 @@ async fn update_rejects_a_package_root_change_during_download() {
             ))
         }
     }
-    let home = TempDir::new().unwrap();
+    let home = TempDir::new_in("/tmp").unwrap();
     let (daemon, _) = manual_update_daemon(&home);
     let identity = executable_identity(&daemon.managed_codex_bin)
         .await
@@ -938,11 +938,11 @@ async fn update_rejects_a_package_root_change_during_download() {
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_owned_updates_require_and_request_an_isolated_installer() {
-    let home = TempDir::new().unwrap();
+    let home = TempDir::new_in("/tmp").unwrap();
     let (mut daemon, release) = manual_update_daemon(&home);
     let root = home.path().join("packages/codez-app-server-daemon");
     std::fs::rename(home.path().join("packages/codez"), &root).unwrap();
-    daemon.managed_codex_bin = root.join("current/codex");
+    daemon.managed_codex_bin = root.join("current/codez");
     let identity = executable_identity(&daemon.managed_codex_bin)
         .await
         .unwrap();

@@ -193,7 +193,9 @@ class InstallCodezShTest(unittest.TestCase):
                 CODEX_INSTALL_IF_LATEST="1", CODEX_UPDATE_FROM_RELEASE=release_name
             )
             self.assertEqual(seeded.returncode, 0, seeded.stderr)
-            self.assertEqual((package / "current/bin/codez").stat().st_ino, binary_inode)
+            self.assertEqual(
+                (package / "current/bin/codez").stat().st_ino, binary_inode
+            )
             self.assertEqual(os.readlink(alias), "bin/codez")
 
             changed = install(

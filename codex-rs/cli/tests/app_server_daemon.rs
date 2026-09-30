@@ -31,12 +31,12 @@ impl TestDaemon {
         } else {
             format!("{}-unknown-linux-musl", std::env::consts::ARCH)
         };
-        let standalone = home.path().join("packages/standalone");
+        let standalone = home.path().join("packages/codez");
         let release_name = format!("0.0.0-{target}");
         let managed = standalone
             .join("releases")
             .join(&release_name)
-            .join("bin/codex");
+            .join("bin/codez");
         std::fs::create_dir_all(managed.parent().context("managed bin parent")?)?;
         // Preserve the installed path without invalidating the shared CLI's Rosetta cache.
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -63,7 +63,7 @@ impl TestDaemon {
             standalone.join("current"),
         )?;
         // Model a daemon that was previously launched and is currently stopped.
-        let state = home.path().join("app-server-daemon");
+        let state = home.path().join("codez-app-server-daemon");
         std::fs::create_dir(&state)?;
         std::fs::write(state.join("app-server.stderr.log"), b"")?;
         Ok(Self {
@@ -93,7 +93,7 @@ impl TestDaemon {
     }
 
     fn pid(&self, name: &str) -> Result<u32> {
-        let record = std::fs::read(self.home.path().join("app-server-daemon").join(name))
+        let record = std::fs::read(self.home.path().join("codez-app-server-daemon").join(name))
             .with_context(|| format!("failed to read {name}"))?;
         Ok(serde_json::from_slice::<Value>(&record)?["pid"]
             .as_u64()
@@ -146,7 +146,10 @@ fn managed_identity_survives_locale_and_timezone_changes() -> Result<()> {
     let daemon = TestDaemon::new()?;
     let mut original = Vec::new();
     let mut updater_pid = 0;
-    let pid_file = daemon.home.path().join("app-server-daemon/app-server.pid");
+    let pid_file = daemon
+        .home
+        .path()
+        .join("codez-app-server-daemon/app-server.pid");
     for (action, locale, timezone, expected_status) in [
         ("start", "C", "UTC0", "started"),
         ("version", "en_AU.UTF-8", "PST8PDT", "running"),
@@ -196,7 +199,7 @@ fn managed_identity_survives_locale_and_timezone_changes() -> Result<()> {
             let updater_socket = daemon
                 .home
                 .path()
-                .join("app-server-daemon/app-server-updater.sock");
+                .join("codez-app-server-daemon/app-server-updater.sock");
             let deadline = Instant::now() + Duration::from_secs(30);
             while !updater_socket.exists() {
                 ensure!(Instant::now() < deadline, "updater did not become ready");
@@ -250,7 +253,7 @@ fn package_ownership_check_does_not_start_an_updater() -> Result<()> {
         "ownership check failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let state = daemon.home.path().join("app-server-daemon");
+    let state = daemon.home.path().join("codez-app-server-daemon");
     assert!(!state.join("app-server-updater.pid").exists());
     assert!(!state.join("daemon-updater.pid").exists());
     Ok(())
@@ -271,7 +274,10 @@ fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
     signal(updater_pid, libc::SIGTERM)?;
     wait_for_exit(updater_pid)?;
     // A replacement updater also upgrades still-verifiable records left by an old CLI.
-    let server_record_path = daemon.home.path().join("app-server-daemon/app-server.pid");
+    let server_record_path = daemon
+        .home
+        .path()
+        .join("codez-app-server-daemon/app-server.pid");
     let mut legacy: Value = serde_json::from_slice(&std::fs::read(&server_record_path)?)?;
     let native = legacy.as_object_mut().unwrap().remove("processIdentity");
     std::fs::write(&server_record_path, serde_json::to_vec(&legacy)?)?;
@@ -302,7 +308,7 @@ fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
         !daemon
             .home
             .path()
-            .join("app-server-daemon/app-server.pid")
+            .join("codez-app-server-daemon/app-server.pid")
             .exists()
     );
     assert_eq!(daemon.lifecycle("start")?["status"], "started");
@@ -310,7 +316,7 @@ fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
         !daemon
             .home
             .path()
-            .join("packages/app-server-daemon")
+            .join("packages/codez-app-server-daemon")
             .exists()
     );
     Ok(())
@@ -319,7 +325,7 @@ fn managed_starts_ensure_one_updater_and_recover_a_missing_one() -> Result<()> {
 #[test]
 fn managed_start_succeeds_when_updater_record_is_invalid() -> Result<()> {
     let daemon = TestDaemon::new()?;
-    let state_dir = daemon.home.path().join("app-server-daemon");
+    let state_dir = daemon.home.path().join("codez-app-server-daemon");
     std::fs::create_dir_all(&state_dir)?;
     std::fs::write(state_dir.join("app-server-updater.pid"), "not a PID record")?;
 
@@ -338,7 +344,11 @@ fn wall_clock_shift_keeps_server_and_updater_managed() -> Result<()> {
     let server_pid = daemon.pid("app-server.pid")?;
     let updater_pid = daemon.pid("app-server-updater.pid")?;
     for name in ["app-server.pid", "app-server-updater.pid"] {
-        let path = daemon.home.path().join("app-server-daemon").join(name);
+        let path = daemon
+            .home
+            .path()
+            .join("codez-app-server-daemon")
+            .join(name);
         let mut record: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         record["processStartTime"] = "historical wall-clock start time".into();
         let replacement = path.with_extension("replacement");
@@ -367,7 +377,7 @@ fn managed_start_keeps_updater_on_marker_mismatch_but_stops_it_for_pin() -> Resu
     let marker = daemon
         .home
         .path()
-        .join("packages/standalone/auto-update-version");
+        .join("packages/codez/auto-update-version");
     std::fs::write(&marker, "0.1.0-other-target")?;
     assert_eq!(daemon.lifecycle("start")?["status"], "alreadyRunning");
     assert_eq!(daemon.pid("app-server-updater.pid")?, updater_pid);
@@ -391,7 +401,7 @@ fn managed_start_keeps_updater_on_marker_mismatch_but_stops_it_for_pin() -> Resu
         !daemon
             .home
             .path()
-            .join("app-server-daemon/app-server-updater.pid")
+            .join("codez-app-server-daemon/app-server-updater.pid")
             .exists()
     );
     Ok(())
@@ -402,7 +412,10 @@ fn restart_applies_saved_updater_preference() -> Result<()> {
     let daemon = TestDaemon::new()?;
     assert_eq!(daemon.lifecycle("start")?["status"], "started");
     let updater_pid = daemon.pid("app-server-updater.pid")?;
-    let settings = daemon.home.path().join("app-server-daemon/settings.json");
+    let settings = daemon
+        .home
+        .path()
+        .join("codez-app-server-daemon/settings.json");
     std::fs::write(
         &settings,
         serde_json::to_vec(&serde_json::json!({
@@ -461,7 +474,7 @@ fn unmanaged_app_server_does_not_launch_updater() -> Result<()> {
         !daemon
             .home
             .path()
-            .join("app-server-daemon/app-server-updater.pid")
+            .join("codez-app-server-daemon/app-server-updater.pid")
             .exists()
     );
     Ok(())
@@ -470,12 +483,7 @@ fn unmanaged_app_server_does_not_launch_updater() -> Result<()> {
 #[test]
 fn manual_update_rejects_an_unowned_installation() -> Result<()> {
     let daemon = TestDaemon::new()?;
-    std::fs::remove_file(
-        daemon
-            .home
-            .path()
-            .join("packages/standalone/current/bin/codex"),
-    )?;
+    std::fs::remove_file(daemon.home.path().join("packages/codez/current/bin/codez"))?;
 
     assert_eq!(daemon.lifecycle("update")?["status"], "unsupported");
     assert!(daemon.pid("app-server.pid").is_err());
@@ -492,7 +500,7 @@ enum InitialDaemon {
 fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut daemon = TestDaemon::new()?;
-    let standalone = daemon.home.path().join("packages/standalone");
+    let standalone = daemon.home.path().join("packages/codez");
     let package = if action == "start" && initial == InitialDaemon::Missing {
         standalone.join("releases/caller")
     } else {
@@ -501,8 +509,8 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     for directory in ["bin", "codex-path", "codex-resources"] {
         std::fs::create_dir_all(package.join(directory))?;
     }
-    copy_executable(&daemon.codex, &package.join("bin/codex"))?;
-    daemon.codex = package.join("bin/codex");
+    copy_executable(&daemon.codex, &package.join("bin/codez"))?;
+    daemon.codex = package.join("bin/codez");
     for helper in [
         "bin/codex-code-mode-host",
         "codex-path/rg",
@@ -525,7 +533,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     std::fs::write(
         package.join("codex-package.json"),
         serde_json::to_vec(&serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"), "target": target, "entrypoint": "bin/codex"
+            "version": option_env!("CODEZ_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")), "target": target, "entrypoint": "bin/codez"
         }))?,
     )?;
     if action == "start" && initial == InitialDaemon::Missing {
@@ -533,7 +541,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         std::os::unix::fs::symlink(&package, standalone.join("current"))?;
     }
     let cli_selection = standalone.join("current").canonicalize()?;
-    let state = daemon.home.path().join("app-server-daemon");
+    let state = daemon.home.path().join("codez-app-server-daemon");
     if initial == InitialDaemon::Missing {
         std::fs::remove_file(state.join("app-server.stderr.log"))?;
     }
@@ -561,7 +569,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         .home
         .path()
         .canonicalize()?
-        .join("packages/app-server-daemon");
+        .join("packages/codez-app-server-daemon");
     let (initial_root, initial_pid_file) = match initial {
         InitialDaemon::Missing => (&dedicated, "daemon.pid"),
         InitialDaemon::Legacy => (&standalone, "app-server.pid"),
@@ -570,7 +578,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         output["managedCodexPath"],
         initial_root
             .canonicalize()?
-            .join("current/bin/codex")
+            .join("current/bin/codez")
             .to_str()
             .context("managed path is not UTF-8")?
     );
@@ -642,7 +650,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         assert_eq!(
             output["managedCodexPath"],
             current
-                .join("bin/codex")
+                .join("bin/codez")
                 .to_str()
                 .context("managed path is not UTF-8")?
         );
