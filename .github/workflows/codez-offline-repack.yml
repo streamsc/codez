@@ -1,0 +1,58 @@
+name: Repair Codez offline bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Codez release to repack without rebuilding binaries
+        required: true
+        default: codez-v0.159.2-r1
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: offline-repack-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  repack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Test offline installer
+        run: python3 -m unittest discover -s scripts/install -p test_codez_offline.py
+      - name: Download and verify existing platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^codez-v[0-9]+\.[0-9]+\.[0-9]+-r[1-9][0-9]*$ ]]
+          mkdir dist
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'codez-package*' --dir dist
+          (cd dist && sha256sum -c codez-package_SHA256SUMS)
+      - name: Rebuild offline bundle and smoke test real Linux package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="codez-offline-${RELEASE_TAG#codez-}.tar.gz"
+          cp scripts/install/install-codez-offline.sh dist/install-codez-offline.sh
+          python3 scripts/build_codez_offline_bundle.py \
+            --release-tag "$RELEASE_TAG" --asset-dir dist \
+            --installer dist/install-codez-offline.sh --output "dist/$bundle"
+          export CODEX_HOME="$RUNNER_TEMP/codez-smoke-home"
+          export CODEX_INSTALL_DIR="$RUNNER_TEMP/codez-smoke-bin"
+          sh dist/install-codez-offline.sh --bundle "dist/$bundle"
+          [[ "$("$CODEX_INSTALL_DIR/codez" --version)" == "codez ${RELEASE_TAG#codez-v}" ]]
+          (cd dist && sha256sum "$bundle" > codez-offline-bundle_SHA256SUMS)
+      - name: Replace repaired offline assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "dist/codez-offline-${RELEASE_TAG#codez-}.tar.gz" \
+            dist/codez-offline-bundle_SHA256SUMS dist/install-codez-offline.sh

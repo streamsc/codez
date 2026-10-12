@@ -329,6 +329,10 @@ jobs:
             --installer scripts/install/install-codez-offline.sh \
             --output "dist/codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz" \
             --force
+          CODEX_HOME="$RUNNER_TEMP/codez-offline-smoke-home" \
+          CODEX_INSTALL_DIR="$RUNNER_TEMP/codez-offline-smoke-bin" \
+            sh dist/install-codez-offline.sh \
+              --bundle "dist/codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz"
           (
             cd dist
             sha256sum "codez-offline-v${{ needs.tag-check.outputs.display }}.tar.gz" > codez-offline-bundle_SHA256SUMS
