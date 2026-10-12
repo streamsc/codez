@@ -16,7 +16,6 @@ INSTALLER = REPO_ROOT / "scripts/install/install-codez-offline.sh"
 BUILDER = REPO_ROOT / "scripts/build_codez_offline_bundle.py"
 TAG = "codez-v0.144.4-r1"
 VERSION = "0.144.4-r1"
-UPSTREAM_VERSION = "0.144.4"
 TARGETS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
     ("Darwin", "x86_64", "x86_64-apple-darwin", False),
@@ -70,6 +69,24 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                     self.assertTrue((current / "codex-path/rg").is_file())
                     if is_linux:
                         self.assertTrue((current / "codex-resources/bwrap").is_file())
+
+    def test_rejects_package_metadata_from_another_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            assets = root / "assets"
+            assets.mkdir()
+            self._write_assets(assets, package_version="0.144.4-r2")
+            bundle = root / "bundle.tar.gz"
+            self._build_bundle(assets, bundle)
+            result = self._run_installer(
+                bundle, root / "home", root / "bin", "Linux", "x86_64"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Package metadata version does not match manifest release version",
+                result.stderr,
+            )
+            self.assertFalse((root / "home/packages/codez/current").exists())
 
     def test_archive_input_and_checksum_failure_do_not_replace_current(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -468,7 +485,13 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             env=env,
         )
 
-    def _write_assets(self, assets: Path, *, generation: str = "default") -> None:
+    def _write_assets(
+        self,
+        assets: Path,
+        *,
+        generation: str = "default",
+        package_version: str = VERSION,
+    ) -> None:
         checksums: list[str] = []
         for _system, _machine, target, is_linux in TARGETS:
             archive_path = assets / f"codez-package-{target}.tar.gz"
@@ -513,7 +536,7 @@ esac
                 "bin/codex-code-mode-host": b"#!/bin/sh\nexit 0\n",
                 "codex-path/rg": b"#!/bin/sh\nexit 0\n",
                 "codex-package.json": (
-                    f'{{"version":"{UPSTREAM_VERSION}","variant":"codez"}}\n'.encode()
+                    f'{{"version":"{package_version}","variant":"codez"}}\n'.encode()
                 ),
             }
             if is_linux:
