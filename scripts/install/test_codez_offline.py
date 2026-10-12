@@ -14,8 +14,8 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install/install-codez-offline.sh"
 BUILDER = REPO_ROOT / "scripts/build_codez_offline_bundle.py"
-TAG = "codez-v0.144.4-r1"
-VERSION = "0.144.4-r1"
+TAG = "codez-v0.159.2-r2"
+VERSION = "0.159.2-r2"
 TARGETS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
     ("Darwin", "x86_64", "x86_64-apple-darwin", False),
@@ -75,7 +75,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             root = Path(temp_dir)
             assets = root / "assets"
             assets.mkdir()
-            self._write_assets(assets, package_version="0.144.4-r2")
+            self._write_assets(assets, package_version="0.159.2-r1")
             bundle = root / "bundle.tar.gz"
             self._build_bundle(assets, bundle)
             result = self._run_installer(
