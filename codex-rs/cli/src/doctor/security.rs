@@ -66,7 +66,7 @@ pub(super) fn endpoint_check(inspection: EndpointInspection) -> DoctorCheck {
     }
 
     let targets = if cfg!(target_os = "windows") {
-        "signed Codex app; codex.exe; codex-windows-sandbox-setup.exe; codex-command-runner.exe; codex-code-mode-host.exe"
+        "signed Codex app; codex.exe; codex-windows-sandbox-setup.exe; codex-command-runner.exe; codez-code-mode-host.exe"
     } else if cfg!(target_os = "macos") {
         "signing team 2DC432GLL2 plus the installed Codex app identity, signed codex agent, and required helpers"
     } else {

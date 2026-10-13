@@ -19,8 +19,8 @@ def prepare_winget_package(package: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["sha256"][entrypoint] = manifest["sha256"].pop("bin/codex.exe")
     (package / "bin/codex.exe").rename(package / entrypoint)
-    (package / "bin/codex-code-mode-host.exe").rename(
-        package / "codex-code-mode-host.exe"
+    (package / "bin/codez-code-mode-host.exe").rename(
+        package / "codez-code-mode-host.exe"
     )
     # Keep resources in place for package-aware discovery and provide the root
     # filenames declared by the existing WinGet portable installer manifest.

@@ -58,7 +58,7 @@ async fn code_mode_model_output_uses_structured_host_timing(
     let experimental_show_cell_overhead = matches!(timing_output, TimingOutput::WithOverhead);
     let mut host = match transport {
         "grpc" => Some(
-            Command::new(codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?)
+            Command::new(codex_utils_cargo_bin::cargo_bin("codez-code-mode-host")?)
                 .args(["--listen", "grpc://127.0.0.1:0"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -238,7 +238,7 @@ async fn code_mode_model_output_uses_structured_host_timing(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn app_server_shares_flag_selected_grpc_code_mode_host_across_threads() -> Result<()> {
-    let host_program = codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?;
+    let host_program = codex_utils_cargo_bin::cargo_bin("codez-code-mode-host")?;
     let mut code_mode_host = Command::new(host_program)
         .args(["--listen", "grpc://127.0.0.1:0"])
         .stdin(Stdio::null())

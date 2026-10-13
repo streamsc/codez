@@ -512,7 +512,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     copy_executable(&daemon.codex, &package.join("bin/codez"))?;
     daemon.codex = package.join("bin/codez");
     for helper in [
-        "bin/codex-code-mode-host",
+        "bin/codez-code-mode-host",
         "codex-path/rg",
         "codex-resources/bwrap",
     ] {
@@ -547,7 +547,13 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     }
     std::fs::write(
         state.join("settings.json"),
-        br#"{"shutdownGraceSeconds":0}"#,
+        // Keep bootstrap focused on local package seeding, including release builds
+        // that would otherwise enable the latest-channel updater.
+        if action == "bootstrap" {
+            br#"{"shutdownGraceSeconds":0,"updater":{"autoUpdateEnabled":false}}"#.as_slice()
+        } else {
+            br#"{"shutdownGraceSeconds":0}"#.as_slice()
+        },
     )?;
     let cli_before = daemon.codex.canonicalize()?;
     let result = daemon
@@ -610,7 +616,7 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
             assert!(!current.exists());
         }
 
-        std::fs::remove_file(package.join("bin/codex-code-mode-host"))?;
+        std::fs::remove_file(package.join("bin/codez-code-mode-host"))?;
         let invalid = daemon
             .command()
             .args(["app-server", "daemon", "update", "--from-cli", "--yes"])
@@ -622,11 +628,11 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
             assert!(!current.exists());
         }
         std::fs::write(
-            package.join("bin/codex-code-mode-host"),
+            package.join("bin/codez-code-mode-host"),
             b"replacement helper",
         )?;
         std::fs::set_permissions(
-            package.join("bin/codex-code-mode-host"),
+            package.join("bin/codez-code-mode-host"),
             std::fs::Permissions::from_mode(0o755),
         )?;
         let replaced = daemon
@@ -658,12 +664,12 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
         assert!(!dedicated.join("auto-update-version").exists());
         assert_eq!(std::fs::read(state.join("settings.json"))?, settings_before);
         assert_eq!(
-            std::fs::read(current.join("bin/codex-code-mode-host"))?,
+            std::fs::read(current.join("bin/codez-code-mode-host"))?,
             b"replacement helper"
         );
         if initial == InitialDaemon::Missing {
             assert_eq!(
-                std::fs::read(original.join("bin/codex-code-mode-host"))?,
+                std::fs::read(original.join("bin/codez-code-mode-host"))?,
                 b"runtime fixture"
             );
         }

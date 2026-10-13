@@ -26,7 +26,7 @@ pub(super) async fn run_tcp_listener(bind_address: SocketAddr) -> Result<()> {
     let local_address = listener
         .local_addr()
         .context("failed to read code-mode gRPC listen address")?;
-    info!("codex-code-mode-host listening on http://{local_address}");
+    info!("codez-code-mode-host listening on http://{local_address}");
     println!("http://{local_address}");
     io::stdout()
         .flush()

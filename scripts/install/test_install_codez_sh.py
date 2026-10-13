@@ -64,13 +64,13 @@ class InstallCodezShTest(unittest.TestCase):
                 )
                 self.assertIn("==> Internal helper remains private at ", result.stdout)
                 self.assertTrue((public_bin / "codez").is_symlink())
-                self.assertFalse((public_bin / "codex-code-mode-host").exists())
+                self.assertFalse((public_bin / "codez-code-mode-host").exists())
 
                 current = codez_home / "packages" / "codez" / "current"
                 self.assertTrue(current.is_symlink())
                 self.assertIn(target, os.readlink(current))
                 self.assertTrue((current / "bin" / "codez").is_file())
-                self.assertTrue((current / "bin" / "codex-code-mode-host").is_file())
+                self.assertTrue((current / "bin" / "codez-code-mode-host").is_file())
                 self.assertEqual(
                     subprocess.check_output([public_bin / "codez"], text=True).strip(),
                     "codez 0.144.4-r1",
@@ -240,7 +240,7 @@ class InstallCodezShTest(unittest.TestCase):
         archive_path = release_dir / asset
         files = {
             "bin/codez": b"#!/bin/sh\nprintf 'codez 0.144.4-r1\\n'\n",
-            "bin/codex-code-mode-host": b"#!/bin/sh\nexit 0\n",
+            "bin/codez-code-mode-host": b"#!/bin/sh\nexit 0\n",
             "codex-package.json": b'{"variant":"codez"}\n',
         }
         if is_linux and include_bwrap:

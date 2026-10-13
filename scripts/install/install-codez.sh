@@ -301,13 +301,13 @@ rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 tar -xzf "$archive_path" -C "$stage_dir"
 
-for required in bin/codez bin/codex-code-mode-host codex-package.json; do
+for required in bin/codez bin/codez-code-mode-host codex-package.json; do
   if [ ! -f "$stage_dir/$required" ]; then
     echo "Release archive is missing $required." >&2
     exit 1
   fi
 done
-chmod 0755 "$stage_dir/bin/codez" "$stage_dir/bin/codex-code-mode-host"
+chmod 0755 "$stage_dir/bin/codez" "$stage_dir/bin/codez-code-mode-host"
 if [ "$system" = "Linux" ]; then
   if [ ! -f "$stage_dir/codex-resources/bwrap" ]; then
     echo "Linux release archive is missing codex-resources/bwrap." >&2
@@ -359,4 +359,4 @@ replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/bin/codez" "$tmp_bin"
 "$BIN_PATH" --version
 echo
 echo "==> Installed Codez at $BIN_PATH"
-echo "==> Internal helper remains private at $CURRENT_LINK/bin/codex-code-mode-host"
+echo "==> Internal helper remains private at $CURRENT_LINK/bin/codez-code-mode-host"

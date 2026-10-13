@@ -287,7 +287,7 @@ async fn review_respects_complete_context_budget(
             | ReviewerResponse::CompactionError
     ) {
         builder = builder
-            .with_code_mode_host_program(codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?);
+            .with_code_mode_host_program(codex_utils_cargo_bin::cargo_bin("codez-code-mode-host")?);
     }
     let image_store = Arc::new(RecordingFileAttachmentStore::default());
     if matches!(reviewer_response, ReviewerResponse::FileImageContinuation) {

@@ -946,7 +946,7 @@ async fn sample_configured_conversation_history_with_delivery(
     };
     let mut builder = if code_mode {
         builder
-            .with_code_mode_host_program(codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?)
+            .with_code_mode_host_program(codex_utils_cargo_bin::cargo_bin("codez-code-mode-host")?)
     } else {
         builder
     };

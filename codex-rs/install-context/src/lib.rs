@@ -9,9 +9,9 @@ use serde::Deserialize;
 
 const BIN_DIRNAME: &str = "bin";
 const CODE_MODE_HOST_EXECUTABLE_NAME: &str = if cfg!(windows) {
-    "codex-code-mode-host.exe"
+    "codez-code-mode-host.exe"
 } else {
-    "codex-code-mode-host"
+    "codez-code-mode-host"
 };
 const PACKAGE_METADATA_FILENAME: &str = "codex-package.json";
 const PATH_DIRNAME: &str = "codex-path";

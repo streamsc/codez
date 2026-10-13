@@ -86,7 +86,7 @@ def build_source_binaries(
         code_mode_host_bin=(
             code_mode_host_bin.resolve()
             if code_mode_host_bin is not None
-            else output_dir / f"codex-code-mode-host{spec.exe_suffix}"
+            else output_dir / f"codez-code-mode-host{spec.exe_suffix}"
         ),
         bwrap_bin=resolve_output_path(
             bwrap_bin,
@@ -119,7 +119,7 @@ def source_binaries_for_target(
     if build_entrypoint:
         binaries.append(variant.cargo_bin)
     if build_code_mode_host:
-        binaries.append("codex-code-mode-host")
+        binaries.append("codez-code-mode-host")
     if build_bwrap:
         binaries.append("bwrap")
     if build_codex_command_runner:

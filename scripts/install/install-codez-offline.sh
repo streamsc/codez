@@ -245,7 +245,7 @@ install_from_bundle() {
   tar -xzf "$archive_path" -C "$stage_dir" || fail "Cannot extract $asset."
   validate_extracted_tree "$stage_dir"
 
-  for required in bin/codez bin/codex-code-mode-host codex-path/rg codex-package.json; do
+  for required in bin/codez bin/codez-code-mode-host codex-path/rg codex-package.json; do
     [ -f "$stage_dir/$required" ] || fail "Release archive is missing $required."
   done
   if [ "$system" = Linux ]; then
@@ -258,7 +258,7 @@ install_from_bundle() {
   [ "$package_variant" = codez ] || fail "Release archive is not a Codez package."
   [ "$package_version" = "$release_version" ] \
     || fail "Package metadata version does not match manifest release version."
-  chmod 0755 "$stage_dir/bin/codez" "$stage_dir/bin/codex-code-mode-host" "$stage_dir/codex-path/rg"
+  chmod 0755 "$stage_dir/bin/codez" "$stage_dir/bin/codez-code-mode-host" "$stage_dir/codex-path/rg"
   if [ "$system" = Linux ]; then chmod 0755 "$stage_dir/codex-resources/bwrap"; fi
   reported_version="$("$stage_dir/bin/codez" --version)"
   [ "$reported_version" = "codez $release_version" ] \
@@ -392,7 +392,7 @@ fi
 
 echo
 echo "==> Installed Codez offline at $BIN_PATH"
-echo "==> Internal helper remains private at $CURRENT_LINK/bin/codex-code-mode-host"
+echo "==> Internal helper remains private at $CURRENT_LINK/bin/codez-code-mode-host"
 if [ "$api_config_requested" = true ]; then
   echo "==> Configured API endpoint: $api_base_url"
   if [ "$model_seen" = true ]; then
