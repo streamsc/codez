@@ -547,7 +547,13 @@ fn packaged_daemon_launch(action: &str, initial: InitialDaemon) -> Result<()> {
     }
     std::fs::write(
         state.join("settings.json"),
-        br#"{"shutdownGraceSeconds":0}"#,
+        // Keep bootstrap focused on local package seeding, including release builds
+        // that would otherwise enable the latest-channel updater.
+        if action == "bootstrap" {
+            br#"{"shutdownGraceSeconds":0,"updater":{"autoUpdateEnabled":false}}"#.as_slice()
+        } else {
+            br#"{"shutdownGraceSeconds":0}"#.as_slice()
+        },
     )?;
     let cli_before = daemon.codex.canonicalize()?;
     let result = daemon
