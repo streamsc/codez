@@ -34,7 +34,7 @@ if name == "codesign":
         target = Path(args[-1]).name
         if target == "CodexCLI.app":
             source = Path(os.environ["CODEX_REPO_ROOT"]) / "signing-verification/codex-provisioned-entitlements.plist"
-        elif target in ("codex", "codex-code-mode-host"):
+        elif target in ("codex", "codez-code-mode-host"):
             source = Path(os.environ["MOCK_SIGNING_SCRIPTS"]) / (target + ".entitlements.plist")
         else:
             sys.exit(0)

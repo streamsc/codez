@@ -19,7 +19,7 @@ runs:
       shell: bash
       working-directory: codex-rs
       env:
-        BASE_BINARIES: "codex codex-app-server codex-code-mode-host"
+        BASE_BINARIES: "codex codex-app-server codez-code-mode-host"
         WINDOWS_ONLY_BINARIES: "codex-command-runner codex-windows-sandbox-setup"
         BUILD_MODE: ${{ inputs.build-mode }}
         # macOS symbol extraction needs packed dSYM bundles before binaries are stripped.
@@ -228,7 +228,7 @@ runs:
 
         package_args=(
           --target "$target"
-          --code-mode-host-bin "${release_dir}/codex-code-mode-host${exe_suffix}"
+          --code-mode-host-bin "${release_dir}/codez-code-mode-host${exe_suffix}"
           --cargo-profile release
           --package-version "$CODEX_PACKAGE_VERSION"
           --force

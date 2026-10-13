@@ -116,7 +116,7 @@ impl CodeModeService {
             .swap(true, Ordering::Relaxed))
         .then(|| {
             format!(
-                "Code Mode is unavailable because {error}. {behavior}; enable `features.code_mode_host` and install `codex-code-mode-host`."
+                "Code Mode is unavailable because {error}. {behavior}; enable `features.code_mode_host` and install `codez-code-mode-host`."
             )
         })
     }

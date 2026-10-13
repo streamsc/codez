@@ -24,7 +24,7 @@ class PackageLayoutTest(unittest.TestCase):
                 package = Path(temp)
                 files = {
                     "bin/codex.exe": b"signed CLI",
-                    "bin/codex-code-mode-host.exe": b"signed code mode host",
+                    "bin/codez-code-mode-host.exe": b"signed code mode host",
                     "codex-resources/codex-command-runner.exe": b"signed runner",
                     "codex-resources/codex-windows-sandbox-setup.exe": b"signed setup",
                     "codex-resources/voice/bin/codex-voice-host.exe": b"signed voice host",
@@ -56,8 +56,8 @@ class PackageLayoutTest(unittest.TestCase):
                 prepare_winget_package(package)
                 entrypoint = f"codex-{target}.exe"
                 files[entrypoint] = files.pop("bin/codex.exe")
-                files["codex-code-mode-host.exe"] = files.pop(
-                    "bin/codex-code-mode-host.exe"
+                files["codez-code-mode-host.exe"] = files.pop(
+                    "bin/codez-code-mode-host.exe"
                 )
                 for helper in (
                     "codex-command-runner.exe",
@@ -88,7 +88,7 @@ class PackageLayoutTest(unittest.TestCase):
             package_dir.mkdir()
             inputs = PackageInputs(
                 entrypoint_bin=touch_executable(root / "codex"),
-                code_mode_host_bin=touch_executable(root / "codex-code-mode-host"),
+                code_mode_host_bin=touch_executable(root / "codez-code-mode-host"),
                 rg_bin=touch_executable(root / "rg"),
                 zsh_bin=None,
                 bwrap_bin=None,
@@ -112,7 +112,7 @@ class PackageLayoutTest(unittest.TestCase):
 
             self.assertTrue((package_dir / "bin" / "codez").is_file())
             self.assertFalse((package_dir / "bin" / "codex").exists())
-            self.assertTrue((package_dir / "bin" / "codex-code-mode-host").is_file())
+            self.assertTrue((package_dir / "bin" / "codez-code-mode-host").is_file())
 
     def test_macos_package_preserves_prebuilt_resource_binaries(self) -> None:
         for variant_name in ("codex", "codex-app-server"):
@@ -133,7 +133,7 @@ class PackageLayoutTest(unittest.TestCase):
                                 root / variant.executable_stem
                             ),
                             code_mode_host_bin=touch_executable(
-                                root / "codex-code-mode-host"
+                                root / "codez-code-mode-host"
                             ),
                             rg_bin=rg_bin,
                             zsh_bin=zsh_bin,
@@ -171,7 +171,7 @@ class PackageLayoutTest(unittest.TestCase):
             package_dir.mkdir()
             inputs = PackageInputs(
                 entrypoint_bin=touch_executable(root / "codex-app-server"),
-                code_mode_host_bin=touch_executable(root / "codex-code-mode-host"),
+                code_mode_host_bin=touch_executable(root / "codez-code-mode-host"),
                 rg_bin=touch_executable(root / "rg"),
                 zsh_bin=None,
                 bwrap_bin=touch_executable(root / "bwrap"),
@@ -193,7 +193,7 @@ class PackageLayoutTest(unittest.TestCase):
                 include_zsh=False,
             )
 
-            self.assertTrue((package_dir / "bin" / "codex-code-mode-host").is_file())
+            self.assertTrue((package_dir / "bin" / "codez-code-mode-host").is_file())
 
 
 def touch_executable(path: Path) -> Path:

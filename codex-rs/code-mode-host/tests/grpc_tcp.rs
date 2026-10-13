@@ -119,7 +119,7 @@ async fn http1_response(endpoint: &str, request: &[u8]) -> Result<String> {
 
 #[tokio::test]
 async fn tcp_listener_opens_a_grpc_session() -> Result<()> {
-    let mut host = Command::new(codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?)
+    let mut host = Command::new(codex_utils_cargo_bin::cargo_bin("codez-code-mode-host")?)
         .args(["--listen", "grpc://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

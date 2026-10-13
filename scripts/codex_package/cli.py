@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
         "--code-mode-host-bin",
         type=Path,
         help=(
-            "Optional prebuilt codex-code-mode-host executable. If omitted, "
+            "Optional prebuilt codez-code-mode-host executable. If omitted, "
             "the host is built with Cargo."
         ),
     )

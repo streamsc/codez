@@ -2096,7 +2096,7 @@ impl TestAppServerBuilder {
         if !custom_program
             && codex_utils_cargo_bin::runfiles_available()
             && let Ok(code_mode_host_program) =
-                codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")
+                codex_utils_cargo_bin::cargo_bin("codez-code-mode-host")
         {
             // Bazel keeps binary targets in separate package directories.
             // Recreate the installed sibling layout without a path override.

@@ -4,7 +4,7 @@ ROOT_OF_EXTRACTED_PACKAGE
 ├── bin
 │   ├── codex[.exe]                       # CLI package only
 │   ├── codex-app-server[.exe]            # app-server package only
-│   └── codex-code-mode-host[.exe]
+│   └── codez-code-mode-host[.exe]
 ├── codex-package.json
 ├── codex-path
 │   └── rg[.exe]
@@ -227,7 +227,7 @@ def test_windows_debug_symbols_resolve_packaged_code(
         code_mode_host_debug_symbols.with_name("codex_code_mode_host.pdb")
     )
     host = symbols.with_suffix(".exe")
-    shutil.copy2(package.cli.with_name("codex-code-mode-host.exe"), host)
+    shutil.copy2(package.cli.with_name("codez-code-mode-host.exe"), host)
     result = subprocess.run(
         ["dumpbin", "/PDBPATH", str(host)],
         cwd=package.directory,

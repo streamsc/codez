@@ -440,9 +440,9 @@ fn validate_package(root: &Path) -> Result<()> {
             "bin/codez"
         },
         if cfg!(windows) {
-            "bin/codex-code-mode-host.exe"
+            "bin/codez-code-mode-host.exe"
         } else {
-            "bin/codex-code-mode-host"
+            "bin/codez-code-mode-host"
         },
         if cfg!(windows) {
             "codex-path/rg.exe"

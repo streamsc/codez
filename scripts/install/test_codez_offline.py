@@ -14,8 +14,8 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install/install-codez-offline.sh"
 BUILDER = REPO_ROOT / "scripts/build_codez_offline_bundle.py"
-TAG = "codez-v0.159.2-r2"
-VERSION = "0.159.2-r2"
+TAG = "codez-v0.159.2-r3"
+VERSION = "0.159.2-r3"
 TARGETS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
     ("Darwin", "x86_64", "x86_64-apple-darwin", False),
@@ -65,7 +65,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                         f"codez {VERSION}",
                     )
                     self.assertTrue((current / "bin/codez").is_file())
-                    self.assertTrue((current / "bin/codex-code-mode-host").is_file())
+                    self.assertTrue((current / "bin/codez-code-mode-host").is_file())
                     self.assertTrue((current / "codex-path/rg").is_file())
                     if is_linux:
                         self.assertTrue((current / "codex-resources/bwrap").is_file())
@@ -75,7 +75,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             root = Path(temp_dir)
             assets = root / "assets"
             assets.mkdir()
-            self._write_assets(assets, package_version="0.159.2-r1")
+            self._write_assets(assets, package_version="0.159.2-r2")
             bundle = root / "bundle.tar.gz"
             self._build_bundle(assets, bundle)
             result = self._run_installer(
@@ -533,7 +533,7 @@ esac
 """
             files = {
                 "bin/codez": codez_script.encode(),
-                "bin/codex-code-mode-host": b"#!/bin/sh\nexit 0\n",
+                "bin/codez-code-mode-host": b"#!/bin/sh\nexit 0\n",
                 "codex-path/rg": b"#!/bin/sh\nexit 0\n",
                 "codex-package.json": (
                     f'{{"version":"{package_version}","variant":"codez"}}\n'.encode()

@@ -233,7 +233,8 @@ jobs:
 
           package_dir="dist/codez-package-${TARGET}"
           test -x "${package_dir}/bin/codez"
-          test -x "${package_dir}/bin/codex-code-mode-host"
+          test -x "${package_dir}/bin/codez-code-mode-host"
+          "${package_dir}/bin/codez-code-mode-host" --help
           [[ "$("${package_dir}/bin/codez" --version)" == "codez ${{ needs.tag-check.outputs.display }}" ]]
           if [[ "${{ matrix.is_linux }}" == "true" ]]; then
             test -x "${package_dir}/codex-resources/bwrap"
