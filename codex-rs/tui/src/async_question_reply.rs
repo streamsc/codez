@@ -2,14 +2,17 @@
 //! Only complete envelopes, optionally following the standard IDE context prefix, are interpreted.
 
 use codex_app_server_protocol::UserInput;
+use codex_context_fragments::AnsweredQuestion;
+use codex_context_fragments::ContextualUserFragment;
+use itertools::Itertools;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AsyncQuestionReply {
     pub(crate) question_item_id: String,
-    question: String,
-    answer: String,
+    pub(crate) question: String,
+    pub(crate) answer: String,
 }
 
 pub(crate) fn parse(text: &str) -> Option<Vec<AsyncQuestionReply>> {
@@ -22,13 +25,12 @@ pub(crate) fn parse(text: &str) -> Option<Vec<AsyncQuestionReply>> {
     let text = text.trim();
     // JSON strings escape newlines, so this cannot match a delimiter inside an answer.
     let text = if text.starts_with("# Context from my IDE setup:\n") {
-        text.rsplit_once("\n## My request for Codez:\n")?.1.trim()
+        text.rsplit_once("\n## My request for Codex:\n")?.1.trim()
     } else {
         text
     };
-    let json = text
-        .strip_prefix("<send_user_message_question_reply>")?
-        .strip_suffix("</send_user_message_question_reply>")?;
+    let (start, end) = AnsweredQuestion::type_markers();
+    let json = text.strip_prefix(start)?.strip_suffix(end)?;
     let replies = match serde_json::from_str::<Replies>(json).ok()? {
         Replies::Many(replies) => replies,
         Replies::One(reply) => vec![reply],
@@ -37,13 +39,14 @@ pub(crate) fn parse(text: &str) -> Option<Vec<AsyncQuestionReply>> {
 }
 
 pub(crate) fn display_text(text: &str) -> Option<String> {
-    Some(
-        parse(text)?
-            .iter()
-            .map(|reply| format!("> {}\n\n{}", reply.question, reply.answer))
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    )
+    Some(display_replies(&parse(text)?))
+}
+
+pub(crate) fn display_replies(replies: &[AsyncQuestionReply]) -> String {
+    replies
+        .iter()
+        .map(|reply| format!("> {}\n\n{}", reply.question, reply.answer))
+        .join("\n\n")
 }
 
 pub(crate) fn parse_input(input: &[UserInput]) -> Option<Vec<AsyncQuestionReply>> {

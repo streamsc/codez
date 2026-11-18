@@ -45,6 +45,15 @@ pub(in crate::analytics) async fn live(
     plan: &str,
 ) -> (tempfile::TempDir, Live) {
     let home = tempfile::tempdir().unwrap();
+    // Embedded startup reloads policy from disk; keep its backend on this fixture too.
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "chatgpt_base_url = {:?}\n",
+            format!("{}/backend-api", server.uri())
+        ),
+    )
+    .unwrap();
     let mut config = ConfigBuilder::default()
         .codex_home(home.path().to_path_buf())
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
@@ -327,6 +336,13 @@ async fn analytics_matches_app_account_routes_and_parameters() {
         ),
         (
             "team",
+            Report::Usage,
+            Grouping::Model,
+            "usage/daily-workspace-user-token-usage-breakdown",
+            vec![("group_by", "day")],
+        ),
+        (
+            "sci_plus",
             Report::Usage,
             Grouping::Model,
             "usage/daily-workspace-user-token-usage-breakdown",

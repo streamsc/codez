@@ -1,10 +1,11 @@
 ---
 source: cli/src/exec_server_args_tests.rs
+assertion_line: 28
 expression: help_text
 ---
 [EXPERIMENTAL] Run the standalone exec-server service
 
-Usage: codex exec-server [OPTIONS] [COMMAND]
+Usage: codez exec-server [OPTIONS] [COMMAND]
 
 Commands:
   forward  Register an existing WebSocket exec-server as a remote environment
@@ -26,7 +27,7 @@ Options:
 
       --strict-config
           Error out when config.toml contains fields that are not recognized by
-          this version of Codex
+          this version of Codez
 
       --disable <FEATURE>
           Disable a feature (repeatable). Equivalent to `-c
@@ -98,6 +99,19 @@ Options:
       --use-agent-identity-auth
           Use Agent Identity auth from CODEX_ACCESS_TOKEN for remote
           registration
+
+      --registration-bearer-stdin
+          Read one registration bearer from stdin
+
+      --executor-credential-stdin
+          Read rotating executor credentials from stdin; exit when the pipe
+          closes
+
+      --chatgpt-token-stdin
+          Read a ChatGPT access token from stdin for HTTPS registration
+
+      --chatgpt-account-id <ID>
+          ChatGPT account ID. Must match the token's account claim when present
 
       --aws-sigv4
           Sign Direct registration and WebSocket handshake requests with AWS

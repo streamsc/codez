@@ -1,0 +1,9 @@
+---
+source: tui/src/app/tests.rs
+assertion_line: 2996
+expression: "normalize_snapshot_paths(render_bottom_popup(&app.chat_widget, 80))"
+---
+› Ask Codez to do anything
+
+  GPT-6.2-Sol default · /tmp/project · child-0 [worker]
+  ← for agents · ? for shortcuts

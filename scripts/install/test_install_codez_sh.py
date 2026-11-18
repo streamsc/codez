@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -71,6 +72,8 @@ class InstallCodezShTest(unittest.TestCase):
                 self.assertIn(target, os.readlink(current))
                 self.assertTrue((current / "bin" / "codez").is_file())
                 self.assertTrue((current / "bin" / "codez-code-mode-host").is_file())
+                self.assertTrue(os.access(current / "bin/codex-exec-server", os.X_OK))
+                self.assertFalse((public_bin / "codex-exec-server").exists())
                 self.assertEqual(
                     subprocess.check_output([public_bin / "codez"], text=True).strip(),
                     "codez 0.144.4-r1",
@@ -79,6 +82,38 @@ class InstallCodezShTest(unittest.TestCase):
                     bwrap = current / "codex-resources" / "bwrap"
                     self.assertTrue(bwrap.is_file())
                     self.assertTrue(os.access(bwrap, os.X_OK))
+
+    def test_same_version_reuses_package_and_rejects_changed_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            release = root / "release"
+            fake_bin = root / "fake-bin"
+            release.mkdir()
+            fake_bin.mkdir()
+            self._write_fake_commands(fake_bin)
+            self._write_release(release, "aarch64-apple-darwin", is_linux=False)
+            env = self._environment(
+                fake_bin, root / "home", root / "bin", release, "Darwin", "arm64"
+            )
+            current = root / "home/packages/codez/current"
+            for attempt in range(2):
+                installed = subprocess.run(
+                    [str(INSTALLER)], env=env, capture_output=True, text=True
+                )
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                if attempt == 0:
+                    identity = (current / "bin/codez").stat().st_ino
+                else:
+                    self.assertEqual((current / "bin/codez").stat().st_ino, identity)
+            helper = current / "bin/codez-code-mode-host"
+            helper.write_text("selected helper must survive")
+            rejected = subprocess.run(
+                [str(INSTALLER)], env=env, capture_output=True, text=True
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("Refusing to overwrite", rejected.stderr)
+            self.assertEqual(helper.read_text(), "selected helper must survive")
+            self.assertEqual((current / "bin/codez").stat().st_ino, identity)
 
     def test_rejects_unsupported_platforms(self) -> None:
         unsupported = (
@@ -112,6 +147,47 @@ class InstallCodezShTest(unittest.TestCase):
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_error, result.stderr)
+
+    def test_executor_validation_preserves_existing_selection(self) -> None:
+        for include_executor, executor_path in (
+            (False, "bin/codex-exec-server"),
+            (True, "bin/another-executor"),
+        ):
+            with (
+                self.subTest(include_executor=include_executor),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                root = Path(temp)
+                release = root / "release"
+                fake_bin = root / "fake-bin"
+                release.mkdir()
+                fake_bin.mkdir()
+                self._write_fake_commands(fake_bin)
+                target = "aarch64-apple-darwin"
+                env = self._environment(
+                    fake_bin, root / "home", root / "bin", release, "Darwin", "arm64"
+                )
+                self._write_release(release, target, is_linux=False)
+                installed = subprocess.run(
+                    [str(INSTALLER)], env=env, capture_output=True, text=True
+                )
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                current = root / "home/packages/codez/current"
+                history = current.parent / "selection-history"
+                before = (os.readlink(current), history.read_bytes())
+                self._write_release(
+                    release,
+                    target,
+                    is_linux=False,
+                    include_executor=include_executor,
+                    executor_path=executor_path,
+                )
+                rejected = subprocess.run(
+                    [str(INSTALLER)], env=env, capture_output=True, text=True
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("exec", rejected.stderr)
+                self.assertEqual((os.readlink(current), history.read_bytes()), before)
 
     def test_rejects_linux_package_without_bwrap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -235,14 +311,28 @@ class InstallCodezShTest(unittest.TestCase):
         *,
         is_linux: bool,
         include_bwrap: bool = True,
+        include_executor: bool = True,
+        executor_path: str = "bin/codex-exec-server",
     ) -> str:
         asset = f"codez-package-{target}.tar.gz"
         archive_path = release_dir / asset
         files = {
             "bin/codez": b"#!/bin/sh\nprintf 'codez 0.144.4-r1\\n'\n",
             "bin/codez-code-mode-host": b"#!/bin/sh\nexit 0\n",
-            "codex-package.json": b'{"variant":"codez"}\n',
+            "bin/codex-exec-server": b"#!/bin/sh\nexit 0\n",
+            "codex-path/rg": b"#!/bin/sh\nexit 0\n",
+            "codex-package.json": json.dumps(
+                {
+                    "version": TAG.removeprefix("codez-v"),
+                    "target": target,
+                    "variant": "codez",
+                    "entrypoint": "bin/codez",
+                    "execServer": executor_path,
+                }
+            ).encode(),
         }
+        if not include_executor:
+            del files["bin/codex-exec-server"]
         if is_linux and include_bwrap:
             files["codex-resources/bwrap"] = b"#!/bin/sh\nexit 0\n"
         with tarfile.open(archive_path, "w:gz") as archive:

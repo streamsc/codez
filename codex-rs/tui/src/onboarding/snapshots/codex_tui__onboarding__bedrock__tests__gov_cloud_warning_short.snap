@@ -1,0 +1,11 @@
+---
+source: tui/src/onboarding/bedrock_tests.rs
+assertion_line: 32
+expression: initial
+---
+Using Codez with AWS
+GovCloud
+
+You are using Codez with
+> Acknowledge
+↑/↓ scroll · enter

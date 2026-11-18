@@ -1,12 +1,13 @@
 ---
 source: tui/src/bottom_pane/memories_settings_view_tests.rs
+assertion_line: 44
 expression: "snapshots.join(\"\\n\\n\")"
 ---
 width=68
 
   Reset all memories?
   This clears local memory files and rollout summaries for the
-  current Codex home.
+  current Codez home.
 
 
 › Reset all memories  Delete local memory files and rollout
@@ -21,7 +22,7 @@ width=69
 
   Reset all memories?
   This clears local memory files and rollout summaries for the
-  current Codex home.
+  current Codez home.
 
 
 › Reset all memories  Delete local memory files and rollout summaries
@@ -35,7 +36,7 @@ width=70
 
   Reset all memories?
   This clears local memory files and rollout summaries for the
-  current Codex home.
+  current Codez home.
 
 
 › Reset all memories  Delete local memory files and rollout summaries
@@ -49,7 +50,7 @@ width=71
 
   Reset all memories?
   This clears local memory files and rollout summaries for the
-  current Codex home.
+  current Codez home.
 
 
 › Reset all memories  Delete local memory files and rollout summaries
@@ -63,7 +64,7 @@ width=72
 
   Reset all memories?
   This clears local memory files and rollout summaries for the current
-  Codex home.
+  Codez home.
 
 
 › Reset all memories  Delete local memory files and rollout summaries

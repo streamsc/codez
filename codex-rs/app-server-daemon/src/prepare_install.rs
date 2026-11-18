@@ -1,6 +1,8 @@
 //! Installs complete CLI packages after confirmation. Initial starts preserve
 //! existing selections; explicit replacements migrate to dedicated packages and stay pinned.
+//! WinGet sources are verified in their original layout before staging a canonical daemon package.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -72,7 +74,7 @@ pub async fn update_from_cli(
             .ok()
             .map(|info| info.app_server_version),
         managed_codex_path,
-        message: "The CLI package is selected and pinned. Run `codex app-server daemon update` to return to production updates.".to_string(),
+        message: "The CLI package is selected and pinned. Run `codez app-server daemon update` to return to production updates.".to_string(),
     }))
 }
 
@@ -94,7 +96,7 @@ async fn prepare_from_package(
         .settings_file
         .parent()
         .and_then(Path::parent)
-        .context("daemon settings path has no Codex home")?;
+        .context("daemon settings path has no Codez home")?;
     let previous_root = managed_install::package_root(home);
     let root = home.join("packages/codez-app-server-daemon");
     anyhow::ensure!(
@@ -118,7 +120,7 @@ async fn prepare_from_package(
     } else {
         anyhow::ensure!(
             previous_root.join("current").symlink_metadata().is_ok(),
-            "no daemon package is selected; run `codex app-server daemon start` first"
+            "no daemon package is selected; run `codez app-server daemon start` first"
         );
     }
     std::fs::create_dir_all(&root)?;
@@ -129,7 +131,7 @@ async fn prepare_from_package(
     let backend = daemon.running_backend_instance(settings).await?;
     anyhow::ensure!(
         backend.is_some() || crate::client::probe(&daemon.socket_path).await.is_err(),
-        "app server is running but is not managed by codex app-server daemon"
+        "app server is running but is not managed by codez app-server daemon"
     );
     let selected = managed_install::managed_codex_bin(home);
     let previous_release = previous_root.join("current").canonicalize().ok();
@@ -144,7 +146,7 @@ async fn prepare_from_package(
         );
     }
     let source = source.context(
-        "this CLI has no complete local package; install a packaged Codex CLI or use the standalone installer",
+        "this CLI has no complete local package; install a packaged Codez CLI or use the standalone installer",
     )?;
     anyhow::ensure!(
         !root.canonicalize()?.starts_with(source.canonicalize()?),
@@ -154,17 +156,21 @@ async fn prepare_from_package(
     let manifest: CodexPackageManifest = serde_json::from_slice(&manifest_bytes)?;
     let version = manifest.version.to_string();
     let target = platform_target()?;
-    let metadata: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    let mut metadata: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
     let entrypoint = if cfg!(windows) {
         "bin/codez.exe"
     } else {
         "bin/codez"
     };
+    let source_entrypoint = metadata["entrypoint"].as_str().unwrap_or_default();
+    let winget = cfg!(windows)
+        && metadata["layoutVersion"] == 1
+        && source_entrypoint == format!("codex-{target}.exe");
     anyhow::ensure!(
-        metadata["target"] == target && metadata["entrypoint"] == entrypoint,
+        metadata["target"] == target && (source_entrypoint == entrypoint || winget),
         "the CLI package does not match this platform or executable"
     );
-    validate_package(source)?;
+    validate_package(source, source_entrypoint)?;
     // A local build may replace the executable while confirmation is pending.
     let running_identity = managed_install::executable_identity(running_exe).await?;
     if mode == InstallMode::Replace {
@@ -226,19 +232,69 @@ async fn prepare_from_package(
     let stage = tempfile::Builder::new()
         .prefix(".staging.")
         .tempdir_in(&releases)?;
-    let digest = package_tree(source, Some(stage.path()))?;
-    validate_package(stage.path())?;
+    let mut staged_digests = BTreeMap::new();
+    let digest = package_tree(source, Some(stage.path()), &mut staged_digests)?;
     let staged_exe = if cfg!(target_os = "macos") && stage.path().join("CodexCLI.app").is_dir() {
-        stage.path().join("CodexCLI.app/Contents/MacOS/codex")
+        Path::new("CodexCLI.app/Contents/MacOS/codex")
     } else {
-        stage.path().join(entrypoint)
+        Path::new(source_entrypoint)
     };
     anyhow::ensure!(
-        package_tree(source, /*destination*/ None)? == digest
+        package_tree(source, /*destination*/ None, &mut BTreeMap::new())? == digest
             && std::fs::read(stage.path().join("codex-package.json"))? == manifest_bytes
-            && managed_install::executable_identity(&staged_exe).await? == running_identity,
+            && staged_digests.get(staged_exe).map(blake3::Hash::as_bytes)
+                == Some(&running_identity.digest),
         "the CLI package changed while preparing the daemon or differs from the running executable"
     );
+    // Reverse the WinGet archive's root filenames only after verifying the copied
+    // source. Hash the final tree for reuse, since it now differs from the source.
+    let digest = if winget {
+        std::fs::create_dir_all(stage.path().join("bin"))?;
+        #[cfg(windows)]
+        for (from, to) in [
+            (staged_exe, Path::new(entrypoint)),
+            (
+                Path::new("codez-code-mode-host.exe"),
+                Path::new("bin/codez-code-mode-host.exe"),
+            ),
+            (
+                Path::new("codex-exec-server.exe"),
+                Path::new("bin/codex-exec-server.exe"),
+            ),
+        ] {
+            windows::publish_release(&stage.path().join(from), &stage.path().join(to)).await?;
+            if let Some(digest) = staged_digests.remove(from) {
+                staged_digests.insert(to.to_path_buf(), digest);
+            }
+        }
+        let voice_path = stage.path().join("codex-resources/voice/manifest.json");
+        if voice_path.try_exists()? {
+            let mut voice: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&voice_path)?)?;
+            let checksums = voice["sha256"]
+                .as_object_mut()
+                .context("invalid WinGet voice manifest checksums")?;
+            let checksum = checksums
+                .remove(source_entrypoint)
+                .context("WinGet voice manifest is missing the CLI checksum")?;
+            checksums.insert(entrypoint.to_string(), checksum);
+            let bytes = serde_json::to_vec_pretty(&voice)?;
+            std::fs::write(voice_path, &bytes)?;
+            staged_digests.insert(
+                PathBuf::from("codex-resources/voice/manifest.json"),
+                blake3::hash(&bytes),
+            );
+        }
+        metadata["entrypoint"] = entrypoint.into();
+        metadata["execServer"] = "bin/codex-exec-server.exe".into();
+        let bytes = serde_json::to_vec_pretty(&metadata)?;
+        std::fs::write(stage.path().join("codex-package.json"), &bytes)?;
+        staged_digests.insert(PathBuf::from("codex-package.json"), blake3::hash(&bytes));
+        package_tree(stage.path(), /*destination*/ None, &mut staged_digests)?
+    } else {
+        digest
+    };
+    validate_package(stage.path(), entrypoint)?;
     let binary_version =
         managed_install::managed_codex_version(&stage.path().join(entrypoint)).await?;
     anyhow::ensure!(
@@ -254,7 +310,7 @@ async fn prepare_from_package(
     if release.try_exists()? {
         anyhow::ensure!(
             !release.symlink_metadata()?.file_type().is_symlink()
-                && package_tree(&release, /*destination*/ None)? == digest,
+                && package_tree(&release, /*destination*/ None, &mut BTreeMap::new())? == digest,
             "an existing daemon release has different contents; refusing to overwrite it"
         );
     } else {
@@ -262,8 +318,12 @@ async fn prepare_from_package(
         if !stage.path().join("codez").exists() {
             std::os::unix::fs::symlink("bin/codez", stage.path().join("codez"))?;
         }
+        #[cfg(windows)]
+        windows::publish_release(stage.path(), &release).await?;
+        #[cfg(not(windows))]
         std::fs::rename(stage.path(), &release)?;
     }
+    let release = release.canonicalize()?;
     let standalone = home.join("packages/codez");
     let canonical_source = source.canonicalize()?;
     let follows_latest = mode == InstallMode::Missing
@@ -332,15 +392,22 @@ async fn prepare_from_package(
     } else if marker.exists() {
         std::fs::remove_file(marker)?;
     }
-    #[cfg(unix)]
-    {
-        let temporary = tempfile::TempDir::new_in(&root)?;
-        let link = temporary.path().join("current");
-        std::os::unix::fs::symlink(&release, &link)?;
-        std::fs::rename(link, root.join("current"))?;
+    if previous_release.as_deref() != Some(release.as_path()) {
+        #[cfg(unix)]
+        {
+            let temporary = tempfile::TempDir::new_in(&root)?;
+            let link = temporary.path().join("current");
+            std::os::unix::fs::symlink(&release, &link)?;
+            std::fs::rename(link, root.join("current"))?;
+        }
+        #[cfg(windows)]
+        windows::select_release(&root, &release)?;
+        if let Err(error) =
+            crate::release_pruning::record_selection(&root, previous_release.as_deref())
+        {
+            tracing::warn!(%error, "could not record daemon selection for pruning");
+        }
     }
-    #[cfg(windows)]
-    windows::select_release(&root, &release)?;
     if backend.is_some() {
         let selected = Daemon {
             pid_file: daemon.pid_file.with_file_name(crate::DAEMON_PID_FILE_NAME),
@@ -351,16 +418,25 @@ async fn prepare_from_package(
             ..daemon.clone()
         };
         selected.start_managed_backend(settings).await.context(
-            "daemon package selected but could not start; retry with `codex app-server daemon start`",
+            "daemon package selected but could not start; retry with `codez app-server daemon start`",
         )?;
         selected.wait_until_ready().await?;
+    }
+    if let Err(error) = crate::release_pruning::prune(daemon, &root, settings).await {
+        tracing::debug!(%error, "skipped daemon release pruning");
     }
     Ok(true)
 }
 
 /// Hash the complete tree and optionally copy those same bytes. Relative file
 /// links are materialized; escaping links and directory links are rejected.
-fn package_tree(root: &Path, destination: Option<&Path>) -> Result<String> {
+/// Only reuse digests for a private staging directory; source and release
+/// validation must pass a fresh map.
+fn package_tree(
+    root: &Path,
+    destination: Option<&Path>,
+    file_digests: &mut BTreeMap<PathBuf, blake3::Hash>,
+) -> Result<String> {
     let canonical_root = root.canonicalize()?;
     let mut hasher = blake3::Hasher::new();
     let mut paths = vec![root.to_path_buf()];
@@ -398,18 +474,27 @@ fn package_tree(root: &Path, destination: Option<&Path>) -> Result<String> {
             paths.extend(entries);
         } else {
             anyhow::ensure!(metadata.is_file(), "package contains an unsupported file");
-            let bytes = std::fs::read(&path)?;
+            let digest = if let Some(digest) = file_digests.get(relative)
+                && destination.is_none()
+            {
+                *digest
+            } else {
+                let bytes = std::fs::read(&path)?;
+                let digest = blake3::hash(&bytes);
+                if let Some(destination) = destination {
+                    let target = destination.join(relative);
+                    std::fs::write(&target, bytes)?;
+                    std::fs::set_permissions(target, metadata.permissions())?;
+                }
+                file_digests.insert(relative.to_path_buf(), digest);
+                digest
+            };
             hasher.update(b"file");
-            hasher.update(blake3::hash(&bytes).as_bytes());
+            hasher.update(digest.as_bytes());
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 hasher.update(&(metadata.permissions().mode() & 0o777).to_le_bytes());
-            }
-            if let Some(destination) = destination {
-                let target = destination.join(relative);
-                std::fs::write(&target, bytes)?;
-                std::fs::set_permissions(target, metadata.permissions())?;
             }
         }
     }
@@ -431,19 +516,24 @@ fn stable_version(value: &str) -> Option<semver::Version> {
         .then_some(version)
 }
 
-fn validate_package(root: &Path) -> Result<()> {
+fn validate_package(root: &Path, entrypoint: &str) -> Result<()> {
+    let code_mode_host = Path::new(entrypoint).with_file_name(if cfg!(windows) {
+        "codez-code-mode-host.exe"
+    } else {
+        "codez-code-mode-host"
+    });
+    let code_mode_host = code_mode_host.to_string_lossy();
+    let exec_server = Path::new(entrypoint).with_file_name(if cfg!(windows) {
+        "codex-exec-server.exe"
+    } else {
+        "codex-exec-server"
+    });
+    let exec_server = exec_server.to_string_lossy();
     let mut names = vec![
         "codex-package.json",
-        if cfg!(windows) {
-            "bin/codez.exe"
-        } else {
-            "bin/codez"
-        },
-        if cfg!(windows) {
-            "bin/codez-code-mode-host.exe"
-        } else {
-            "bin/codez-code-mode-host"
-        },
+        entrypoint,
+        code_mode_host.as_ref(),
+        exec_server.as_ref(),
         if cfg!(windows) {
             "codex-path/rg.exe"
         } else {
@@ -461,7 +551,7 @@ fn validate_package(root: &Path) -> Result<()> {
     for name in names {
         if !root.join(name).is_file() {
             return Err(anyhow!(
-                "local Codex package is missing {name}; reinstall the CLI or use the standalone installer"
+                "local Codez package is missing {name}; reinstall the CLI or use the standalone installer"
             ));
         }
         #[cfg(unix)]
@@ -469,7 +559,7 @@ fn validate_package(root: &Path) -> Result<()> {
             use std::os::unix::fs::PermissionsExt;
             if std::fs::metadata(root.join(name))?.permissions().mode() & 0o111 == 0 {
                 return Err(anyhow!(
-                    "local Codex package file {name} is not executable; reinstall the CLI or use the standalone installer"
+                    "local Codez package file {name} is not executable; reinstall the CLI or use the standalone installer"
                 ));
             }
         }

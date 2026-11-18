@@ -16,6 +16,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_pty::ProcessDriver;
 use codex_utils_pty::ProcessSignal;
+use codex_windows_sandbox_test_support::WindowsSandboxAccountTestGuard;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::fs;
@@ -76,10 +77,9 @@ fn sandbox_cwd() -> PathBuf {
         return PathBuf::from(workspace_root);
     }
 
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .to_path_buf()
+    codex_utils_cargo_bin::repo_root()
+        .expect("resolve repository root")
+        .join("codex-rs")
 }
 
 fn sandbox_home(name: &str) -> TempDir {
@@ -137,7 +137,7 @@ fn wait_for_path(path: &Path, timeout: Duration) -> bool {
 
 fn open_process_for_wait(pid: u32) -> std::io::Result<OwnedHandle> {
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    if handle == 0 {
+    if handle.is_null() {
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
@@ -302,6 +302,8 @@ fn legacy_non_tty_cmd_emits_output() {
 
 #[test]
 fn elevated_non_tty_cmd_forwards_env_output_and_exit() {
+    let _account_guard =
+        WindowsSandboxAccountTestGuard::acquire().expect("lock Windows sandbox test accounts");
     let _guard = legacy_process_test_guard();
     let runtime = current_thread_runtime();
     runtime.block_on(async move {
@@ -773,6 +775,10 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         .expect("write delete script");
 
         let env_map = HashMap::from([
+            (
+                "SystemRoot".to_string(),
+                std::env::var("SystemRoot").expect("Windows SystemRoot"),
+            ),
             ("TEMP".to_string(), temp_root.to_string_lossy().into_owned()),
             ("TMP".to_string(), tmp_root.to_string_lossy().into_owned()),
             (

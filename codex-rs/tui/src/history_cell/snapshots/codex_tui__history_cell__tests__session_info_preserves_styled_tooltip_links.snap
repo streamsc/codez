@@ -1,11 +1,11 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 824
+assertion_line: 847
 expression: "rendered.join(\"\\n\")"
 ---
   Tip: Use /copy or ctrl+y;
-  visit the Codex community
-    link 12..27: Codex community -> https://example.com
+  visit the Codez community
+    link 12..27: Codez community -> https://example.com
   forum (https://example.com).
     link 2..7: forum -> https://example.com
     link 9..28: https://example.com -> https://example.com

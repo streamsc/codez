@@ -1,0 +1,17 @@
+---
+source: tui/src/app/tests/new_session_tests.rs
+assertion_line: 321
+expression: "normalize_snapshot_paths(render_bottom_popup(&app.chat_widget, 80))"
+---
+  >_ Codez (v0.169.1)
+     /tmp/project
+
+
+› status   [Skill]
+  statsig  [Skill]
+
+  enter insert · esc close
+
+› $stat
+
+  GPT-5.6-Sol default · /tmp/project

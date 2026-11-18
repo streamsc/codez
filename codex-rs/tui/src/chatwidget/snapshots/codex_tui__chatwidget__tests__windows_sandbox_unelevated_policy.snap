@@ -1,8 +1,9 @@
 ---
 source: tui/src/chatwidget/tests/permissions.rs
+assertion_line: 1899
 expression: "render_bottom_popup(&chat, 100)"
 ---
-  Set up the Codex agent sandbox to protect your files and control network access. Learn more
+  Set up the Codez agent sandbox to protect your files and control network access. Learn more
   <https://developers.openai.com/codex/windows>
 
 

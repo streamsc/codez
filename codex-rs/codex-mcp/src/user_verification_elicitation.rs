@@ -20,14 +20,11 @@ pub(super) async fn route(
                     .is_host_owned_apps(&server_name, server.config())
             })
     });
-    let Some((events, authority)) = events
-        .zip(authority)
-        .filter(|_| plugin_service && !router.auto_deny())
-    else {
+    let Some((events, authority)) = events.zip(authority).filter(|_| plugin_service) else {
         return Ok(ElicitationResponse {
             action: ElicitationAction::Cancel,
             content: None,
-            meta: None,
+            meta: Some(codex_rmcp_client::UserVerificationReason::ApprovalUnavailable.into_meta()),
         });
     };
     router

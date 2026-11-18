@@ -217,6 +217,8 @@ jobs:
           CODEZ_VERSION: ${{ needs.tag-check.outputs.display }}
         run: |
           set -euo pipefail
+          STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+          export STABLE_GIT_COMMIT
           package_args=(--force)
           if [[ "${{ matrix.is_linux }}" == "true" ]]; then
             package_args+=(--bwrap-bin "codex-rs/target/${TARGET}/release/bwrap")
@@ -235,6 +237,9 @@ jobs:
           test -x "${package_dir}/bin/codez"
           test -x "${package_dir}/bin/codez-code-mode-host"
           "${package_dir}/bin/codez-code-mode-host" --help
+          test -x "${package_dir}/bin/codex-exec-server"
+          "${package_dir}/bin/codex-exec-server" --help
+          [[ "$("${package_dir}/bin/codex-exec-server" --version)" == "codex-exec-server ${{ needs.tag-check.outputs.display }}" ]]
           [[ "$("${package_dir}/bin/codez" --version)" == "codez ${{ needs.tag-check.outputs.display }}" ]]
           if [[ "${{ matrix.is_linux }}" == "true" ]]; then
             test -x "${package_dir}/codex-resources/bwrap"

@@ -1415,6 +1415,19 @@ Background Server
     #[test]
     fn render_human_report_snapshot_covers_environment_rows() {
         let mut report = sample_report();
+        report.checks.push(
+            DoctorCheck::new(
+                "network.reachability",
+                "network",
+                CheckStatus::Fail,
+                "provider is unreachable",
+            )
+            .remediation(super::super::network::SYSTEM_PROXY_REMEDIATION),
+        );
+        report.checks.push(
+            DoctorCheck::new("config.load", "config", CheckStatus::Ok, "config loaded")
+                .detail("configured TUI mode: fullscreen"),
+        );
         report.checks.push(DoctorCheck::new(
             "system.disk",
             "disk",
@@ -1968,7 +1981,7 @@ Run codez doctor without --summary for detailed diagnostics.
     #[test]
     fn copyable_items_use_check_status() {
         let description =
-            "/tmp/logs_2.sqlite, ~/goals_1.sqlite integrity check; try --summary or `codex doctor`";
+            "/tmp/logs_2.sqlite, ~/goals_1.sqlite integrity check; try --summary or `codez doctor`";
         let details = r"see ./logs, ../goals. C:\logs, D:/goals. c:\logs, \\server\share\logs, \\?\C:\logs, \\?\UNC\server\share\logs, \\.\pipe\codex, \??\C:\logs, \DosDevices\C:\logs, \rooted. http://localhost:8080: https://example.com; wss://example.com) and `/tmp/my data/logs_2.sqlite`";
         let mut rendered = String::new();
 

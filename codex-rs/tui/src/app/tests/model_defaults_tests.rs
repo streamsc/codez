@@ -1,7 +1,11 @@
 use super::*;
 use crate::collaboration_modes;
 use codex_app_server_client::AppServerClient;
+use codex_app_server_client::CloudOperation;
+use codex_app_server_client::CloudUserMessageReceipt;
 use codex_config::LoaderOverrides;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use crossterm::event::KeyCode;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -32,28 +36,59 @@ async fn session_model_selection_preserves_defaults_and_updates_active_thread() 
             ReasoningEffortConfig::Max,
         ] {
             while events.try_recv().is_ok() {}
-            Box::pin(app.handle_event(
-                &mut tui,
-                &mut server,
-                AppEvent::SelectSessionModel {
-                    model: "gpt-5.6-terra".into(),
-                    effort: Some(effort.clone()),
-                },
-            ))
-            .await?;
+            let command = match effort {
+                ReasoningEffortConfig::High => {
+                    "/model gpt-5.6-terra --reasoning high --speed=standard".into()
+                }
+                ReasoningEffortConfig::Ultra => "/model --reasoning=ultra".into(),
+                ReasoningEffortConfig::Max => "/model --reasoning max".into(),
+                _ => unreachable!(),
+            };
+            app.chat_widget.apply_external_edit(command);
+            app.chat_widget.handle_key_event(KeyCode::Esc.into());
+            app.chat_widget.handle_key_event(KeyCode::Enter.into());
+            let mut messages = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let AppEvent::InsertHistoryCell(cell) = &event {
+                    messages.push(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)));
+                }
+                Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+            }
             let settings = next_thread_settings_updated(&mut server, thread_id).await;
             assert_eq!(
                 (
                     settings.thread_settings.model.as_str(),
-                    settings.thread_settings.effort.clone()
+                    settings.thread_settings.effort.clone(),
+                    settings.thread_settings.service_tier.as_deref(),
                 ),
-                ("gpt-5.6-terra", Some(effort.clone()))
+                ("gpt-5.6-terra", Some(effort.clone()), Some("default"))
             );
             if mode == ModeKind::Default && effort == ReasoningEffortConfig::High {
-                insta::assert_snapshot!(
-                    "session_only_model_confirmation",
-                    next_history_message(&mut events)
-                );
+                for command in [
+                    "/model gpt-5.6-terra fast",
+                    "/model gpt-5.6-terra --speeed=fast",
+                    "/model gpt-5.6-terra --reasoning=invalid",
+                    "/model --speed",
+                    "/model --reasoning=",
+                    "/model --reasoning --speed=standard",
+                    "/model --speed=fast --speed standard",
+                ] {
+                    app.chat_widget.apply_external_edit(command.into());
+                    app.chat_widget.handle_key_event(KeyCode::Esc.into());
+                    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+                }
+                while let Ok(event) = events.try_recv() {
+                    assert!(!matches!(
+                        event,
+                        AppEvent::SelectSessionModel { .. }
+                            | AppEvent::AstraSelectedFromModelPicker { .. }
+                    ));
+                    if let AppEvent::InsertHistoryCell(cell) = &event {
+                        messages.push(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)));
+                    }
+                    Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+                }
+                insta::assert_snapshot!("session_only_model_confirmation", messages.join("\n"));
             }
             app.enqueue_thread_notification(
                 thread_id,
@@ -79,6 +114,163 @@ async fn session_model_selection_preserves_defaults_and_updates_active_thread() 
             Some(ReasoningEffortConfig::Low)
         );
         server.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn standard_speed_selection_falls_back_for_older_app_servers() -> Result<()> {
+    let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
+    app.config.service_tier = Some("flex".into());
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let started = server.start_thread(&app.config).await?;
+    app.enqueue_primary_thread_session(started.session, started.turns)
+        .await?;
+    app.chat_widget.set_service_tier(Some("flex".into()));
+    server.thread_settings_update_supported = false;
+    while events.try_recv().is_ok() {}
+    while ops.try_recv().is_ok() {}
+
+    app.select_session_model(
+        &mut server,
+        "gpt-5.6-terra".into(),
+        Some(ReasoningEffortConfig::High),
+        Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.into()),
+    )
+    .await;
+
+    assert_eq!(
+        app.chat_widget.current_service_tier(),
+        Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE)
+    );
+    assert_eq!(app.config.service_tier.as_deref(), Some("flex"));
+    app.chat_widget.apply_external_edit("continue".into());
+    app.chat_widget.handle_key_event(KeyCode::Esc.into());
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    assert_matches!(
+        next_user_turn_op(&mut ops),
+        Op::UserTurn { service_tier, .. }
+            if service_tier == Some(Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.into()))
+    );
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cloud_model_selection_waits_for_native_admission() -> Result<()> {
+    let turn = test_turn("cloud-turn", TurnStatus::InProgress, Vec::new());
+    for receipt in [
+        Ok(CloudUserMessageReceipt::Started(turn.clone())),
+        Ok(CloudUserMessageReceipt::Steered(turn)),
+        Err(codex_app_server_protocol::JSONRPCErrorError {
+            code: -32602,
+            message: "Cloud reply attachment failed local preflight".into(),
+            data: None,
+        }),
+        Err(codex_app_server_protocol::JSONRPCErrorError {
+            code: -32000,
+            message: "Native mutation outcome unknown".into(),
+            data: None,
+        }),
+    ] {
+        let admitted = receipt.is_ok();
+        let unconfirmed = receipt.as_ref().is_err_and(|error| error.code == -32000);
+        let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        app.chat_widget
+            .handle_thread_session(test_thread_session(thread_id, app.config.cwd.to_path_buf()));
+        app.active_thread_id = Some(thread_id);
+        let original_model = app.chat_widget.current_model().to_string();
+        let original_effort = app.chat_widget.current_reasoning_effort();
+        let (client, mut commands, _server_events) =
+            codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+        let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            AppServerClient::Cloud(client),
+            crate::app_server_session::ThreadParamsMode::Cloud,
+        );
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        while events.try_recv().is_ok() {}
+
+        let event = AppEvent::ApplyModelSelection {
+            model: "gpt-5.6-terra".into(),
+            effort: Some(ReasoningEffortConfig::High),
+        };
+        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+        assert!(commands.try_recv().is_err());
+        assert!(app.chat_widget.cloud_picker_selection.is_none());
+        let messages = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(
+                messages.join("\n"),
+                @"• Selected gpt-5.6-terra high for the next new turn in this conversation"
+            );
+        }
+        app.chat_widget.apply_external_edit("continue".into());
+        app.chat_widget.handle_key_event(KeyCode::Esc.into());
+        app.chat_widget.handle_key_event(KeyCode::Enter.into());
+        let op = next_user_turn_op(&mut ops);
+        let admit = async {
+            let command = commands.recv().await.expect("native admission request");
+            let CloudOperation::SubmitUserMessage(params) = command.operation else {
+                panic!("expected StartOrSteer");
+            };
+            assert_eq!(
+                (params.model.as_deref(), params.effort),
+                (Some("gpt-5.6-terra"), Some(ReasoningEffortConfig::High))
+            );
+            let response = receipt.map(|receipt| serde_json::to_value(receipt).unwrap());
+            command.response.send(Ok(response)).unwrap();
+        };
+        let submit = Box::pin(super::super::user_turn_submission::try_submit_user_turn(
+            &mut app,
+            &mut server,
+            thread_id,
+            &op,
+        ));
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(submit, admit)
+        })
+        .await?;
+        assert!(result?);
+        assert_eq!(
+            (
+                app.chat_widget.current_model(),
+                app.chat_widget.current_reasoning_effort(),
+            ),
+            (original_model.as_str(), original_effort),
+        );
+        let input = app.chat_widget.capture_thread_input_state();
+        let held = input.is_some_and(|input| input.has_unconfirmed_messages());
+        assert_eq!(held, unconfirmed);
+        let rejected = !admitted && !unconfirmed;
+        let restored = if rejected { "continue" } else { "" };
+        assert_eq!(app.chat_widget.composer_text_with_pending(), restored);
+        let accepted = app.chat_widget.cloud_picker_selection.as_ref();
+        assert_eq!(
+            accepted.map(|selection| (selection.model.as_str(), selection.effort.clone())),
+            admitted.then_some(("gpt-5.6-terra", Some(ReasoningEffortConfig::High))),
+        );
+        if accepted.is_some() {
+            app.chat_widget.open_model_popup();
+            let popup = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+            let label = popup.lines().find(|line| line.contains("Accepted for"));
+            insta::allow_duplicates! {
+                insta::assert_snapshot!(label.unwrap().trim(), @"Accepted for future turns: gpt-5.6-terra · High");
+            }
+            app.chat_widget.handle_thread_session(test_thread_session(
+                thread_id,
+                app.config.cwd.to_path_buf(),
+            ));
+            assert!(app.chat_widget.cloud_picker_selection.is_none());
+        }
     }
     Ok(())
 }
@@ -140,6 +332,7 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         )
         .await?;
         let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
             AppServerClient::InProcess(client),
             crate::app_server_session::ThreadParamsMode::Remote,
         );
@@ -164,9 +357,18 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         ] {
             Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
         }
+        let mut service_tier_error = None;
         let messages = std::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
                 AppEvent::InsertHistoryCell(cell) => {
+                    if outcome == "rejected" {
+                        let text = lines_to_single_string(&cell.transcript_lines(/*width*/ 200));
+                        if text.contains("Failed to save default service tier") {
+                            service_tier_error = Some(
+                                text.replace(&profile_path.display().to_string(), "<config-path>"),
+                            );
+                        }
+                    }
                     Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
                 }
                 _ => None,
@@ -186,6 +388,10 @@ async fn model_default_saves_report_server_outcomes_and_target_server_profile() 
         }
         let persisted = std::fs::read_to_string(&profile_path)?;
         if outcome == "rejected" {
+            insta::assert_snapshot!(
+                "service_tier_default_save_error",
+                service_tier_error.expect("expected a service-tier save error")
+            );
             assert_eq!(persisted, "[broken");
             assert!(!messages.contains("Model changed"));
             assert!(!messages.contains("Service tier set"));

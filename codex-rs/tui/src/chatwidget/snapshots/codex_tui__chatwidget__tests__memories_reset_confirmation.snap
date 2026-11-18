@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3314
 expression: popup
 ---
   Reset all memories?
-  This clears local memory files and rollout summaries for the current Codex
+  This clears local memory files and rollout summaries for the current Codez
   home.
 
 

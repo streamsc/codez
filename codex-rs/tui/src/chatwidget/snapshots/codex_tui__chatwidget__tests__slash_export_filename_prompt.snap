@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/slash_commands.rs
+assertion_line: 2414
 expression: popup
 ---
   Save conversation
 
-› codex-session-00000000-0000-0000-0000-000000000123.md
+› codez-session-00000000-0000-0000-0000-000000000123.md
 
   enter submit · esc back

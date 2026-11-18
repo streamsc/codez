@@ -1,0 +1,29 @@
+---
+source: tui/src/chatwidget/tests/permissions.rs
+assertion_line: 1048
+expression: visible
+---
+                                        
+  Set up the Codez agent sandbox to     
+  protect your files and control        
+  network access. Learn more            
+  <https://developers.openai.com/codex  
+  /windows>                             
+                                        
+                                        
+› 1. Set up default sandbox (requires   
+     Administrator permissions)         
+  2. Use non-admin sandbox (higher risk 
+     if prompt injected)                
+  3. Quit                               
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+  enter select · esc back

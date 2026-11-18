@@ -1,0 +1,14 @@
+---
+source: tui/src/bottom_pane/chat_composer.rs
+assertion_line: 5279
+expression: terminal.backend()
+---
+"                                                            "
+"› Ask Codez to do anything                                  "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"  ? for shortcuts           Vim: Insert · 100% context left "

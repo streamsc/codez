@@ -1,9 +1,8 @@
 ---
 source: tui/src/chatwidget/tests/guardian.rs
-assertion_line: 432
-expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+assertion_line: 656
+expression: normalize_working_snapshot(term.backend().vt100().screen().contents())
 ---
-
 
 
 
@@ -19,3 +18,4 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 › Ask Codez to do anything
 
   GPT-5.6-Sol default · /tmp/project
+  ? for shortcuts

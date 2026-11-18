@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import stat
@@ -14,8 +15,8 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install/install-codez-offline.sh"
 BUILDER = REPO_ROOT / "scripts/build_codez_offline_bundle.py"
-TAG = "codez-v0.159.2-r3"
-VERSION = "0.159.2-r3"
+TAG = "codez-v0.169.1-r1"
+VERSION = "0.169.1-r1"
 TARGETS = (
     ("Darwin", "arm64", "aarch64-apple-darwin", False),
     ("Darwin", "x86_64", "x86_64-apple-darwin", False),
@@ -66,6 +67,10 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                     )
                     self.assertTrue((current / "bin/codez").is_file())
                     self.assertTrue((current / "bin/codez-code-mode-host").is_file())
+                    self.assertTrue(
+                        os.access(current / "bin/codex-exec-server", os.X_OK)
+                    )
+                    self.assertFalse((public_bin / "codex-exec-server").exists())
                     self.assertTrue((current / "codex-path/rg").is_file())
                     if is_linux:
                         self.assertTrue((current / "codex-resources/bwrap").is_file())
@@ -75,7 +80,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             root = Path(temp_dir)
             assets = root / "assets"
             assets.mkdir()
-            self._write_assets(assets, package_version="0.159.2-r2")
+            self._write_assets(assets, package_version="0.169.1-r2")
             bundle = root / "bundle.tar.gz"
             self._build_bundle(assets, bundle)
             result = self._run_installer(
@@ -85,6 +90,23 @@ class CodezOfflineInstallerTest(unittest.TestCase):
             self.assertIn(
                 "Package metadata version does not match manifest release version",
                 result.stderr,
+            )
+            self.assertFalse((root / "home/packages/codez/current").exists())
+
+    def test_rejects_missing_executor_before_selecting_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            assets = root / "assets"
+            assets.mkdir()
+            self._write_assets(assets, include_executor=False)
+            bundle = root / "bundle.tar.gz"
+            self._build_bundle(assets, bundle)
+            result = self._run_installer(
+                bundle, root / "home", root / "bin", "Linux", "x86_64"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Release archive is missing bin/codex-exec-server", result.stderr
             )
             self.assertFalse((root / "home/packages/codez/current").exists())
 
@@ -347,13 +369,39 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(expected, result.stderr)
 
+    def test_same_version_reuses_package_and_rejects_changed_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle = self._build_extracted_bundle(root / "old", generation="old")
+            changed = self._build_extracted_bundle(root / "changed", generation="new")
+            home = root / "home"
+            public_bin = root / "bin"
+            current = home / "packages/codez/current"
+            for attempt in range(2):
+                installed = self._run_installer(
+                    bundle, home, public_bin, "Linux", "x86_64"
+                )
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                if attempt == 0:
+                    identity = (current / "bin/codez").stat().st_ino
+                else:
+                    self.assertEqual((current / "bin/codez").stat().st_ino, identity)
+            selected = os.readlink(current)
+            binary = (current / "bin/codez").read_bytes()
+            rejected = self._run_installer(changed, home, public_bin, "Linux", "x86_64")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("Refusing to overwrite", rejected.stderr)
+            self.assertEqual(os.readlink(current), selected)
+            self.assertEqual((current / "bin/codez").read_bytes(), binary)
+            self.assertEqual((current / "bin/codez").stat().st_ino, identity)
+
     def test_bootstrap_failures_restore_same_version_install_config_and_auth(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             old_bundle = self._build_extracted_bundle(root / "old", generation="old")
-            new_bundle = self._build_extracted_bundle(root / "new", generation="new")
+            new_bundle = self._build_extracted_bundle(root / "new", generation="old")
             codez_home = root / "codex-home"
             public_bin = root / "bin"
 
@@ -397,6 +445,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
                     )
 
                     self.assertNotEqual(failed.returncode, 0)
+                    self.assertIn(f"simulated {failure_mode} failure", failed.stderr)
                     self.assertNotIn("sk-new-secret", failed.stdout + failed.stderr)
                     self.assertEqual(os.readlink(current), previous_current)
                     self.assertEqual(
@@ -491,6 +540,7 @@ class CodezOfflineInstallerTest(unittest.TestCase):
         *,
         generation: str = "default",
         package_version: str = VERSION,
+        include_executor: bool = True,
     ) -> None:
         checksums: list[str] = []
         for _system, _machine, target, is_linux in TARGETS:
@@ -534,11 +584,22 @@ esac
             files = {
                 "bin/codez": codez_script.encode(),
                 "bin/codez-code-mode-host": b"#!/bin/sh\nexit 0\n",
+                "bin/codex-exec-server": b"#!/bin/sh\nexit 0\n",
                 "codex-path/rg": b"#!/bin/sh\nexit 0\n",
                 "codex-package.json": (
-                    f'{{"version":"{package_version}","variant":"codez"}}\n'.encode()
+                    json.dumps(
+                        {
+                            "version": package_version,
+                            "target": target,
+                            "variant": "codez",
+                            "entrypoint": "bin/codez",
+                            "execServer": "bin/codex-exec-server",
+                        }
+                    ).encode()
                 ),
             }
+            if not include_executor:
+                del files["bin/codex-exec-server"]
             if is_linux:
                 files["codex-resources/bwrap"] = b"#!/bin/sh\nexit 0\n"
             with tarfile.open(archive_path, "w:gz") as archive:

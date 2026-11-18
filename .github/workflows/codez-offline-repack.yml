@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Existing Codez release to repack without rebuilding binaries
         required: true
-        default: codez-v0.159.2-r1
+        default: codez-v0.169.1-r1
         type: string
 
 permissions:

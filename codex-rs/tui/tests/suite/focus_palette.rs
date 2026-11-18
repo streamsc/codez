@@ -24,6 +24,8 @@ const FOCUS_PROBE_INPUT: &str = "focus-palette-24527";
 
 #[path = "external_editor_tests.rs"]
 mod external_editor;
+#[path = "gov_cloud_guidance_tests.rs"]
+mod gov_cloud_guidance;
 #[path = "tui_mode_picker_tests.rs"]
 mod tui_mode_picker;
 
@@ -208,24 +210,38 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
     first_frame.process(&terminal.output[..end]);
     let first_contents = first_frame.screen().contents();
     ensure!(
-        first_contents.contains("Codez") && first_contents.contains("Ask Codex to do anything"),
+        first_contents.contains("Codez") && first_contents.contains("Ask Codez to do anything"),
         "owned-screen synchronization ended before its first complete loading frame:\n{first_contents}"
     );
     let composer_row = first_contents
         .lines()
-        .position(|line| line.contains("Ask Codex to do anything"))
+        .position(|line| line.contains("Ask Codez to do anything"))
         .context("missing composer in first owned-screen frame")?;
     assert_eq!(
         (
-            first_contents.matches("Ask Codex to do anything").count(),
+            first_contents.matches("Ask Codez to do anything").count(),
             first_frame.screen().cursor_position(),
             first_frame.screen().hide_cursor(),
         ),
         (1, (u16::try_from(composer_row)?, 2), false),
         "first owned-screen frame must contain one composer with its visible cursor"
     );
+    let exit_start = terminal.output.len();
     terminal.write_input(b"\x1b[99;5u")?;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while !contains_bytes(&terminal.output[exit_start..], b"\x1b[c") {
+        terminal.ensure_running()?;
+        ensure!(Instant::now() < deadline, "missing exit DA1 query");
+        terminal.read_output(Duration::from_millis(/*millis*/ 50))?;
+    }
+    assert_eq!(
+        terminal.parser.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::None
+    );
+    // The DA1 reply straddles the first 1 KiB of in-flight mouse reports.
+    let mut reports = b"\x1b[<51;23;56M".repeat(85);
+    reports.extend_from_slice(b"\x1b[?1;2c");
+    terminal.write_input(&reports)?;
     loop {
         terminal.read_output(Duration::from_millis(/*millis*/ 50))?;
         if let Some(status) = terminal.child.try_wait()? {
@@ -238,6 +254,10 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
             terminal.screen_contents()
         );
     }
+    terminal.write_input(b"shell\n")?;
+    let mut shell_input = [0; 6];
+    terminal.slave.read_exact(&mut shell_input)?;
+    assert_eq!(&shell_input, b"shell\n");
     ensure!(
         !terminal.parser.screen().alternate_screen(),
         "alternate screen was not restored"
@@ -245,7 +265,7 @@ fn default_owned_screen_entry_paints_before_sync_ends_and_exit_clears_inline_dra
     ensure!(
         !terminal
             .screen_contents()
-            .contains("Ask Codex to do anything"),
+            .contains("Ask Codez to do anything"),
         "owned-screen exit left the inline composer visible"
     );
     Ok(())
@@ -275,6 +295,7 @@ fn fullscreen_transcript_can_opt_out_to_terminal_scrollback() -> Result<()> {
 
 pub(super) struct PtyCodex {
     master: File,
+    slave: File,
     child: Child,
     parser: vt100::Parser,
     output: Vec<u8>,
@@ -363,16 +384,20 @@ impl PtyCodex {
             .env_remove("STY")
             .env("TERM_PROGRAM", "kitty")
             .env_remove("TERM_PROGRAM_VERSION")
+            // Exercise the fixture's login state even on hosts configured with workload identity.
+            .env_remove(codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR)
+            .env_remove(codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR)
             .env("OPENAI_API_KEY", "focus-palette-test")
             .env("CODEX_HOME", codex_home.path())
             .stdin(stdin)
             .stdout(stdout)
-            .stderr(slave)
+            .stderr(slave.try_clone()?)
             .spawn()
             .context("start Codex in focus-test pseudo-terminal")?;
 
         Ok(Self {
             master,
+            slave,
             child,
             parser: vt100::Parser::new(
                 /*rows*/ 32, /*cols*/ 120, /*scrollback_len*/ 0,
@@ -443,8 +468,10 @@ impl PtyCodex {
             self.cursor_answered = true;
         }
 
-        if !self.keyboard_answered && contains_bytes(&self.output, b"\x1b[?u") {
-            self.write_input(b"\x1b[?7u")?;
+        if !self.keyboard_answered && contains_bytes(&self.output, b"\x1b[c") {
+            if contains_bytes(&self.output, b"\x1b[?u") {
+                self.write_input(b"\x1b[?7u")?;
+            }
             self.write_input(b"\x1b[?1;2c")?;
             self.keyboard_answered = true;
         }
@@ -590,7 +617,7 @@ fn no_daemon_skips_startup_and_discovery() -> Result<()> {
             !terminal
                 ._codex_home
                 .path()
-                .join("app-server-daemon")
+                .join("codez-app-server-daemon")
                 .exists()
         );
         if let Some(listener) = listener {
@@ -619,7 +646,7 @@ fn auto_daemon_start_failure_exits_with_manual_fallback_hint() -> Result<()> {
         contents.replace("features.daemon_auto_start = false\n", ""),
     )?;
     // An incomplete selected package must fail without installing a replacement.
-    std::fs::create_dir_all(home.path().join("packages/app-server-daemon/current"))?;
+    std::fs::create_dir_all(home.path().join("packages/codez-app-server-daemon/current"))?;
     let mut terminal = PtyCodex::start(
         workspace.path(),
         home,

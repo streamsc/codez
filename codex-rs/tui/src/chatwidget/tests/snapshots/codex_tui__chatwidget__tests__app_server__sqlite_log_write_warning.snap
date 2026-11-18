@@ -1,11 +1,12 @@
 ---
 source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 2355
 expression: "super::helpers::render_bottom_popup(&chat, 80)"
 ---
   Warnings · 1 of 1 · Warning
 
-  Codex couldn't save diagnostic logs to its local database. Use /feedback
-  with logs included before closing Codex, or run `codex doctor` for
+  Codez couldn't save diagnostic logs to its local database. Use /feedback
+  with logs included before closing Codez, or run `codez doctor` for
   diagnostics.
 
 
@@ -13,4 +14,4 @@ expression: "super::helpers::render_bottom_popup(&chat, 80)"
 
 
 
-  k keep & next · esc dismiss & close · ctrl+o copy · ←/→ warning · ↓ scroll
+  k keep & next · esc dismiss & close · ⌃o copy · ←/→ warning

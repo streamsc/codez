@@ -1,13 +1,13 @@
 ---
 source: tui/src/status/tests.rs
+assertion_line: 1663
 expression: sanitized
 ---
 /status
 
-  >_ Codez (v0.159.2-r1)
+  >_ Codez (v0.169.1)
 
-  Visit
-  https://chatgpt.com/codex/settings/usage
+  Visit https://chatgpt.com/settings/usage
   for up-to-date
   information on rate limits and credits
 

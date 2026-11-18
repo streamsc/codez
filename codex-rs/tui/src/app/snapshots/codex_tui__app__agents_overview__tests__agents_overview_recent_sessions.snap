@@ -18,11 +18,11 @@ expression: "age.replace_all(&rendered, \" [age]\")"
     ○ Task 4                                           Inactive [age]
     ○ Task 3                                           Inactive [age]
 
+      Show more
 
 
 
 
 
 
-
-  ? help  esc back  ↑/↓ move  enter open  n new
+  ? help  ↑/↓ move  enter open  n new

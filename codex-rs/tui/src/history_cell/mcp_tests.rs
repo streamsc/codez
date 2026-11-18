@@ -25,6 +25,7 @@ fn mcp_inventory_connection_states() {
     .into_iter()
     .map(|(name, runtime_status)| McpServerStatus {
         server_capabilities: None,
+        tool_list_meta: None,
         name: name.to_string(),
         runtime_status,
         plugin_id: None,
@@ -153,6 +154,7 @@ fn mcp_preview_shares_one_limit_across_blocks_and_preserves_transcript() {
             json!({"type": "text", "text": "third\nfourth\nfifth"}),
         ])),
     );
+    assert_eq!(cell.tool_call_labels(), ["Called search.lookup"]);
     let display = cell.display_lines(/*width*/ 80);
     let transcript = cell.transcript_lines(/*width*/ 80);
     insta::assert_snapshot!(format!(
@@ -215,12 +217,12 @@ fn code_mode_output_shares_a_row_budget_across_blocks() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(display, @r"
+    insta::assert_snapshot!(display, @"
     • Inspect page
       └ Page title
         Navigation
         Main content
-        +3 lines (ctrl+t to view transcript)
+        +3 lines (⌃t to view transcript)
     ");
     let transcript = cell
         .transcript_lines(/*width*/ 100)
@@ -260,12 +262,12 @@ fn code_mode_output_preserves_trailing_failure_diagnostics_in_transcript() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(display, @r"
+    insta::assert_snapshot!(display, @"
     • Inspect page
       └ Script failed
         Page title
         Navigation
-        +6 lines (ctrl+t to view transcript)
+        +6 lines (⌃t to view transcript)
     ");
     let transcript = cell
         .transcript_lines(/*width*/ 80)
@@ -540,6 +542,7 @@ fn titled_image_call_keeps_error_and_full_title_when_narrow() {
         },
         /*animations_enabled*/ false,
     );
+    assert_eq!(cell.tool_call_labels(), [format!("Calling {title}")]);
     assert_eq!(
         cell.display_lines(/*width*/ 80)[0].to_string(),
         format!("• {title}")
@@ -570,6 +573,8 @@ fn titled_image_call_keeps_error_and_full_title_when_narrow() {
             .to_string()
             .contains(title)
     );
+    cell.invocation.arguments = Some(json!({"title": "   "}));
+    assert_eq!(cell.tool_call_labels(), ["Failed node_repl.js"]);
 }
 
 /// Reconstruct only from explicit provenance, checking every displayed source slice on the way.

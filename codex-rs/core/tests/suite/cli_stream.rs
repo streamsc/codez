@@ -114,7 +114,7 @@ impl Drop for ChildProcessCleanupGuard {
     }
 }
 
-// Use this for new `codex exec` subprocess tests in this file. These commands
+// Use this for new `codez exec` subprocess tests in this file. These commands
 // can spawn shell/Python grandchildren, so the timeout path must reap the whole
 // process group instead of only the direct CLI child.
 fn run_cli_command(command: &mut Command) -> io::Result<Output> {
@@ -347,21 +347,16 @@ async fn exec_cli_applies_model_instructions_file() {
     assert!(output.status.success());
 
     // Inspect the captured request and verify our custom base instructions were
-    // included in the `instructions` field.
+    // included in the base instructions developer message.
     let request = resp_mock.single_request();
-    let body = request.body_json();
-    let instructions = body
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let instructions = request.instructions_text();
     assert!(
         instructions.contains(marker),
         "instructions did not contain custom marker; got: {instructions}"
     );
 }
 
-/// Verify that `codex exec --profile ...` preserves the active user config
+/// Verify that `codez exec --profile ...` preserves the active user config
 /// profile when it starts the in-process app-server thread, so the selected
 /// profile's `model_instructions_file` reaches the outbound request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -419,12 +414,7 @@ async fn exec_cli_profile_applies_model_instructions_file() {
     assert!(output.status.success());
 
     let request = resp_mock.single_request();
-    let body = request.body_json();
-    let instructions = body
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let instructions = request.instructions_text();
     assert!(
         instructions.contains(marker),
         "instructions did not contain profile marker; got: {instructions}"

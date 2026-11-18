@@ -11,7 +11,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 
 
 
-
 ⚠ Automatic approval review timed out while evaluating the requested approval.
 
 ✗ Review timed out before Codez could run curl -sS -i -X POST --data-binary
@@ -23,3 +22,4 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 › Ask Codez to do anything
 
   GPT-5.6-Sol default · /tmp/project
+  ? for shortcuts

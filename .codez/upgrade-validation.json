@@ -1,0 +1,114 @@
+{
+  "date": "2026-11-18",
+  "upstream": {
+    "tag": "rust-v0.169.1",
+    "commit": "c376cf7396eff83ce4c6ac61b9553df142e7a0be"
+  },
+  "previousHead": "99db46c1812c8cfc0e001e0eeba6bfaffa72b717",
+  "codezVersion": "0.169.1-r1",
+  "environment": {
+    "rust": "1.95.0",
+    "nativeTarget": "aarch64-apple-darwin",
+    "buildProfile": "dev with debug info and incremental compilation disabled",
+    "testRunner": "just test (cargo nextest, local profile)",
+    "colorTests": "NO_COLOR removed from test environment"
+  },
+  "sourceChecks": {
+    "modelsCatalogMatchesUpstream": true,
+    "modelsCatalogSha256": "d50b6749506d97e5f334dbabcb666eb1689f423cf3e88cfabdcf3c536b873068",
+    "thirdPartyLockPackagesMatchUpstream": 1310,
+    "sqlite": "3.54 via libsqlite3-sys 0.39.1 and the upstream SQLx patch",
+    "originalUntrackedDiffReportsPreserved": 14,
+    "bazelLockUpdateAndCheck": "passed",
+    "configSchemaRegeneration": "passed",
+    "targetedClippyFix": "passed without warnings or automatic code fixes",
+    "repositoryFormatting": "just fmt passed",
+    "whitespaceCheck": "passed with snapshot end padding and unchanged upstream patch blank EOF lines excluded"
+  },
+  "rustTests": {
+    "method": "Consolidated results from full runs of the listed scopes and passing targeted reruns of every failure; this is not a full workspace run.",
+    "components": {
+      "modelsManager": 60,
+      "corePlugins": 507,
+      "state": 245,
+      "appServerDaemon": 90,
+      "execServerCli": 37,
+      "mcp": 282
+    },
+    "behavior": {
+      "coreTrustCompactionAndInterruptSelection": 148,
+      "codeModeHost": 43,
+      "tui": 6127,
+      "execRequiredMcpFailure": 1
+    },
+    "cli": {
+      "passed": 356,
+      "skipped": 1
+    },
+    "installContext": 16,
+    "appServerPermissionAndProviderResume": 22,
+    "retests": {
+      "modelSwitchProgramPairs": "17 passed; resumed fixtures retain initial feature settings, including disabled Apps",
+      "tuiFullRunFailures": "all 12 failures/timeouts passed targeted reruns",
+      "cliFullRunFailures": "both failures passed targeted reruns",
+      "mcpProbe": "passed isolated rerun after an initial probe timeout"
+    }
+  },
+  "pythonTests": {
+    "codezInstallers": {
+      "passed": 17
+    },
+    "packageBuilder": {
+      "passed": 29
+    },
+    "githubScripts": {
+      "passed": 64,
+      "skipped": 1
+    }
+  },
+  "nativePackageSmoke": {
+    "status": "passed",
+    "target": "aarch64-apple-darwin",
+    "version": "0.169.1-r1",
+    "checks": [
+      "Build CLI, private code-mode host and standalone executor; package real binaries with ripgrep",
+      "Online installer over a local release transport; repeat installation reuses the installed inode",
+      "Independent daemon package selection preserves the CLI selection",
+      "Private code-mode host and executor are not exposed in the public command directory",
+      "Executor banner, initialize and environment/info report the complete package version",
+      "Offline installer preserves saved file credentials and the selected OpenAI Responses provider",
+      "Installed CLI sends successful GPT-6.2 Sol and Astra Responses calls to a local mock API"
+    ],
+    "provenance": "Local verification binaries use the upstream dev build stamp. Release CI stamps the actual release commit through STABLE_GIT_COMMIT."
+  },
+  "limitations": [
+    "Full workspace tests were not run.",
+    "Actual execution was verified only on macOS ARM64; Linux ARM64/x86_64 and macOS x86_64 packaging remain covered by the four-target workflow and package/installer fixtures.",
+    "Windows-specific changes were not executed on Windows.",
+    "Responses calls used local mock services, not the private production gateway.",
+    "Bazel lock consistency was checked; Bazel source/V8 builds and release-profile cross-platform builds were not run."
+  ],
+  "localEvidence": {
+    "codez-component-tests.log": "565627924464cfaed6838ae8f8b88c81715dc6aa69e2895937c27412ecf88712",
+    "codez-component-retest.log": "fe19553f432043a5b9846084fdbbddd677b5680cac4447a8503222186d8895da",
+    "codez-mcp-probe-retest.log": "5162bf555529a7cca1af8c4aa58f78e5d28889c7a4977b29c877a97cbfca24a3",
+    "codez-behavior-tests.log": "fa1040445c11a27a8b8435d9e750792167a83f53ad923ed7a9d84728ae882af3",
+    "codez-compact-fixed.log": "e2977ebe19b846ffaf723d25b6bcb59aaf2dd24b24a3d113da54856925d583a4",
+    "codez-tui-retest.log": "08c1c9b59e99d6ec28e8ec083ed599594f12469bd345e05368b71396e84fc57c",
+    "codez-tui-final-retest.log": "0fb4c1f7bb563f0d7cc5c499d6afaf633451de0cf9bd4e566d5e94d7e06cc123",
+    "codez-tui-fixed.log": "06e8b300e2d9dfd21af4c06a41ef868fdd0d165bfb3e6353c41408d2f050f09e",
+    "codez-cli-retest.log": "8a360dbedf0ddc85b3282164c22108f6bc45c815e999bf863957bb0d4208cae6",
+    "codez-cli-fixed.log": "5174d9a01d62f74bce645f386a667d4f2052b11f346840eda53d3f348d55e665",
+    "codez-gpt62-final.log": "27d4637d3f3ac5de792ef6d46288b8b02f351637701bc7816c6ea4d317ea340c",
+    "codez-install-context-tests-final.log": "c51280d4544dae9490d433d36150942fffe6c8d6d404efb794bf873778022608",
+    "codez-resume-tests.log": "7893ac39d60f752aa40107e41f53d93b3a2de9a30a1e39bfbb37f6ba8304ca63",
+    "codez-all-install-tests.log": "1319baedb004e76cfa46169b35f464b39249cca7d7adf83fe9111af9faa0c4bb",
+    "codez-package-tests-final.log": "3e9d0d586bcc4d02e624b18a1b7c78a5cece92baf5bc249f4e14b702b906a2d0",
+    "codez-github-tests.log": "c7ae6150c9e4572c754eeb425b9039db6c2758bbfcc7b088f37ee50090de9f10",
+    "codez-fix.log": "9d0b276e4998192dc9e05a55501f45d3ab99f49abbc7de919efcc7234527ecda",
+    "codez-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "codez-config-schema.log": "9126768e80fbdce9f943d183a6e6261b416244a6aeb60279b9393063a5e4cf06",
+    "codez-native-final-build.log": "fcf5748b6fa5c5468e42176062de1c75a6f027885173ed750f9ca1e502cea07a",
+    "codez-real-package-smoke.log": "36bc4bce524bc46b20df0d86afd4342ad28ba3a2960f19d8fe69047cd54328a6"
+  }
+}

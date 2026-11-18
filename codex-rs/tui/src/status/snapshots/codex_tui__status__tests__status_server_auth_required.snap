@@ -1,12 +1,13 @@
 ---
 source: tui/src/status/tests.rs
+assertion_line: 847
 expression: rendered
 ---
 /status
 
-  >_ Codez (v0.0.0)
+  >_ Codez (v0.169.1)
 
-  Visit https://chatgpt.com/codex/settings/usage for up-to-date
+  Visit https://chatgpt.com/settings/usage for up-to-date
   information on rate limits and credits
 
   Model:           gpt-5.6-sol (reasoning none, summaries auto)

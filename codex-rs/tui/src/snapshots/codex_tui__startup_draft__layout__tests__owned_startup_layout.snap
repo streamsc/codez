@@ -1,13 +1,15 @@
 ---
 source: tui/src/startup_draft_layout_tests.rs
+assertion_line: 29
 expression: "format!(\"cursor={:?}\\n{frame}\",\nlayout.cursor_pos(area)).replace(crate::version::CODEX_CLI_VERSION,\n\"<VERSION>\")"
 ---
-cursor=Some((13, 12))
+cursor=Some((13, 13))
                                                 
-  >_ Codez (v<VERSION>)                        
+  >_ Codez (v<VERSION>)                           
      loading                                    
                                                 
-  Pull up a prompt.                             
+                                                
+                                                
                                                 
                                                 
                                                 
@@ -16,6 +18,5 @@ cursor=Some((13, 12))
                                                 
 › first line                                    
   second line                                   
-                                                
                                                 
   Waiting for startup  · esc cancel

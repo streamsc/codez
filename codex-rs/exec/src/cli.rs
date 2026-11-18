@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    override_usage = "codez exec [OPTIONS] [PROMPT]\n       codez exec [OPTIONS] <COMMAND> [ARGS]"
+    override_usage = "codex exec [OPTIONS] [PROMPT]\n       codex exec [OPTIONS] <COMMAND> [ARGS]"
 )]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
@@ -28,9 +28,19 @@ pub struct Cli {
     #[arg(long = "thread-source", value_name = "SOURCE", global = true)]
     pub thread_source: Option<ThreadSource>,
 
+    /// Request an experimental Cyber access program for this turn (OpenAI provider only).
+    /// Omit to use server defaults. Not supported with review; fork requires a prompt.
+    #[arg(long, value_enum, value_name = "PROGRAM", global = true)]
+    pub cyber_access_program: Option<CyberAccessProgramCliArg>,
+
     /// Allow running Codez outside a Git repository.
     #[arg(long = "skip-git-repo-check", global = true, default_value_t = false)]
     pub skip_git_repo_check: bool,
+
+    /// Save trust for this project and future chats, including MCP commands outside the sandbox.
+    /// Persists even with --ephemeral. Does not override an explicitly untrusted project.
+    #[arg(long, global = true)]
+    pub trust: bool,
 
     /// Run without persisting session files to disk.
     #[arg(long = "ephemeral", global = true, default_value_t = false)]
@@ -78,6 +88,24 @@ pub struct Cli {
     /// a prompt is also provided, stdin is appended as a `<stdin>` block.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum CyberAccessProgramCliArg {
+    Standard,
+    DaybreakBlue,
+    DaybreakRed,
+}
+
+impl From<CyberAccessProgramCliArg> for codex_app_server_protocol::CyberAccessProgram {
+    fn from(value: CyberAccessProgramCliArg) -> Self {
+        match value {
+            CyberAccessProgramCliArg::Standard => Self::Standard,
+            CyberAccessProgramCliArg::DaybreakBlue => Self::DaybreakBlue,
+            CyberAccessProgramCliArg::DaybreakRed => Self::DaybreakRed,
+        }
+    }
 }
 
 impl std::ops::Deref for Cli {

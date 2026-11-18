@@ -1,0 +1,14 @@
+---
+source: tui/src/onboarding/bedrock_tests.rs
+assertion_line: 8
+expression: render_visible(&state)
+---
+Using Codez with AWS GovCloud
+
+You are using Codez with AWS GovCloud. Please ensure you or your
+administrator have read the application configuration and security
+guidance before proceeding.
+
+> Acknowledge
+
+  Press enter to continue

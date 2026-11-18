@@ -1,9 +1,9 @@
 # codex-app-server-daemon
 
-> `codex-app-server-daemon` is experimental and its lifecycle contract may
+> `codez-app-server-daemon` is experimental and its lifecycle contract may
 > change while the remote-management flow is still being developed.
 
-`codex-app-server-daemon` backs the machine-readable `codez app-server`
+`codez-app-server-daemon` backs the machine-readable `codez app-server`
 lifecycle commands used by remote clients such as the desktop and mobile apps.
 It is intended for Codez instances launched over SSH, including fresh developer
 machines that should expose app-server with `remote_control` enabled.
@@ -49,14 +49,16 @@ Eligible managed daemons check for updates after five minutes, then hourly by
 default. Edit `CODEX_HOME/app-server-daemon/settings.json` to change this:
 
 ```json
-{"remoteControlEnabled": false,
- "shutdownGraceSeconds": 60,
- "updater": {"autoUpdateEnabled": false, "updateIntervalMinutes": 120}}
+{
+  "remoteControlEnabled": false,
+  "shutdownGraceSeconds": 60,
+  "updater": { "autoUpdateEnabled": false, "updateIntervalMinutes": 120 }
+}
 ```
 
 Positive minute intervals have no configured cap. `daemon restart` applies the
 enabled state; the next updater wait reads a new interval. The preference does
-not affect an explicit `codex update` command or `daemon update`.
+not affect an explicit `codez update` command or `daemon update`.
 
 `daemon update` selects the latest stable release, even with automatic updates
 disabled. It also returns pinned or local managed packages to production update
@@ -104,7 +106,7 @@ channel, and the managed binary supports the updater command.
 ## Installation and update cases
 
 New daemons use `CODEX_HOME/packages/codez-app-server-daemon/current/bin/codez`
-(`codex.exe` on Windows). The package contains the executable and its helpers.
+(`codez.exe` on Windows). The package contains the executable and its helpers.
 Daemon-only installer updates leave the user's CLI command and shell setup alone.
 
 Previously launched legacy daemons retain `CODEX_HOME/packages/codez/current`,
@@ -114,11 +116,11 @@ compatible dedicated package before stopping the legacy updater and daemon,
 selecting the new package, and restarting only a previously running daemon.
 The old CLI package files and selection remain unchanged.
 
-| Situation | What starts | Does this daemon fetch new binaries? | Does a running app-server eventually move to a newer binary on its own? |
-| --- | --- | --- | --- |
-| Latest-channel installer has run; `start` or `bootstrap` is used with automatic updates enabled | Managed binary and detached updater when supported | When supported, the platform's installer runs on the configured cadence. | When supported, the running server restarts with the new binary before the updater replaces itself. |
-| Installer selected an explicit release; `bootstrap` is used | Managed binary only | No; the selected release stays pinned. | No; an explicit restart uses the selected binary. |
-| Another tool updates the managed binary | A fresh start or explicit restart uses it; a running server is reused. | Yes, when a latest-channel updater is running, on the configured cadence. | An updater that was running through the change compares binary contents on its next successful installer pass and refreshes the server first. |
+| Situation                                                                                       | What starts                                                            | Does this daemon fetch new binaries?                                      | Does a running app-server eventually move to a newer binary on its own?                                                                       |
+| ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Latest-channel installer has run; `start` or `bootstrap` is used with automatic updates enabled | Managed binary and detached updater when supported                     | When supported, the platform's installer runs on the configured cadence.  | When supported, the running server restarts with the new binary before the updater replaces itself.                                           |
+| Installer selected an explicit release; `bootstrap` is used                                     | Managed binary only                                                    | No; the selected release stays pinned.                                    | No; an explicit restart uses the selected binary.                                                                                             |
+| Another tool updates the managed binary                                                         | A fresh start or explicit restart uses it; a running server is reused. | Yes, when a latest-channel updater is running, on the configured cadence. | An updater that was running through the change compares binary contents on its next successful installer pass and refreshes the server first. |
 
 ### Managed packages
 
@@ -154,7 +156,7 @@ other tool updates the managed binary path:
   once that replacement starts successfully
 - if the updater was absent during a same-version binary replacement, a later
   managed start recovers it but cannot infer the running server's previous
-  executable identity; use `codex app-server daemon restart` to refresh the server
+  executable identity; use `codez app-server daemon restart` to refresh the server
 
 ## Lifecycle semantics
 
@@ -169,9 +171,10 @@ so the new setting takes effect immediately.
 
 Top-level `codez remote-control start` enables and persists remote control for
 the managed daemon, overriding a saved disabled value. It starts or bootstraps
-the daemon as needed. Plain `codez remote-control` runs a separate foreground
-server and does not change daemon settings; `codez remote-control stop` stops
-the managed daemon without clearing its saved remote-control preference.
+the daemon as needed. Plain `codez remote-control` uses the managed daemon when
+eligible; `codez remote-control --no-daemon` runs a separate foreground server.
+`codez remote-control stop` stops the managed daemon without clearing its saved
+remote-control preference.
 `daemon start` and `daemon restart` use that saved preference. `daemon bootstrap`
 sets it according to `--remote-control` (disabled when omitted).
 
