@@ -47,12 +47,15 @@ jobs:
     needs: tag-check
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
       ARCHIVE: codez-package-${{ matrix.target }}.tar.gz
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # Packages are stripped and do not ship symbol sidecars. Avoid carrying
+      # debug information through ThinLTO on standard hosted macOS runners.
+      CARGO_PROFILE_RELEASE_DEBUG: "none"
       CODEX_REPO_ROOT: ${{ github.workspace }}
       SCCACHE_CACHE_SIZE: 2G
       TARGET: ${{ matrix.target }}
